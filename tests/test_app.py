@@ -8,10 +8,11 @@ import pytest
 
 from crypto_terminal import app as app_module
 from crypto_terminal.app import TerminalApp
+from crypto_terminal.book import BookFeed
 from crypto_terminal.feed import Tick
 from crypto_terminal.history import Candle, Product
-from crypto_terminal.theme import GREEN
-from crypto_terminal.widgets import ChartPane, PairPicker, PriceTable
+from crypto_terminal.theme import GREEN, RED
+from crypto_terminal.widgets import ChartPane, DepthPane, PairPicker, PriceTable
 
 PRODUCTS = [Product(f"{base}-{quote}", base, quote, name) for base, name in
             (("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("XRP", "XRP"), ("SOL", "Solana"), ("ADA", "Cardano"),
@@ -34,9 +35,24 @@ class FakeFeed:
         await asyncio.Event().wait()
 
 
+class FakeBookFeed(BookFeed):
+    """The real book logic; only the connection is fake. Tests push messages with `handle`."""
+
+    instances = []
+
+    def __init__(self, symbol):
+        super().__init__(symbol)
+        FakeBookFeed.instances.append(self)
+
+    async def run(self):
+        self.last_msg = time.monotonic()
+        self._status("live")
+        await asyncio.Event().wait()
+
+
 @pytest.fixture
 def offline(tmp_path, monkeypatch):
-    FakeFeed.instances = []
+    FakeFeed.instances, FakeBookFeed.instances = [], []
     path = tmp_path / "watchlist.json"
     monkeypatch.setattr(app_module, "WATCHLIST_FILE", path)
     monkeypatch.setattr(app_module, "CONFIG_FILE", tmp_path / "config.json")
@@ -44,6 +60,8 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "desktop_notify", lambda title, message: DESKTOP.append(message))
     DESKTOP.clear()
     monkeypatch.setattr(app_module, "Feed", FakeFeed)
+    monkeypatch.setattr(app_module, "BookFeed", FakeBookFeed)
+    monkeypatch.setattr(app_module, "BOOK_DELAY", 0.05)
 
     async def fake_exists(client, symbol):  # only used when the product list failed to load
         return symbol == "DOGE-USD"
@@ -322,10 +340,160 @@ async def test_zoom_redraws_without_fetching_and_f_cycles_views(offline, monkeyp
         await pilot.press("f")  # chart only: the chart gets the whole width
         await pilot.pause()
         assert not table.display and column.display and visible() > counts[1]
-        await pilot.press("f")  # watchlist only, stretched across the screen
+        await pilot.press("f")  # watchlist only, stretched across the screen: the sparkline takes the spare width
         await pilot.pause()
-        assert table.display and not column.display and table.outer_size.width == 150
-        await pilot.press("f")  # back to split
+        assert table.display and not column.display and table.outer_size.width == 149  # 1 column kept for the scrollbar
+        assert table.virtual_size.width == table.scrollable_content_region.width  # no blank columns at the side
+        await pilot.press("f")  # back to split: the watchlist is only as wide as its columns
         await pilot.pause()
-        assert table.display and column.display and table.outer_size.width == 65
+        widths = sum(c.get_render_width(table) for c in table.columns.values())
+        assert table.display and column.display and table.outer_size.width == widths + 1  # + its border
         assert visible() == counts[1] and len(fetches) == 1
+
+
+async def test_book_follows_selection_and_skips_pairs_scrolled_past(offline, monkeypatch):
+    monkeypatch.setattr(app_module, "BOOK_DELAY", 0.5)
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause(0.8)
+        pane = app.query_one(DepthPane)
+        assert [f.symbol for f in FakeBookFeed.instances] == ["BTC-USD"] and pane.feed is FakeBookFeed.instances[0]
+        await pilot.press("down", "down", "down")  # scrolled past ETH and XRP within the delay
+        assert pane.feed is None and pane.symbol == "SOL-USD"  # the old pair's book is gone at once
+        await pilot.pause(0.8)
+        assert [f.symbol for f in FakeBookFeed.instances] == ["BTC-USD", "SOL-USD"]
+        assert pane.feed is FakeBookFeed.instances[-1]
+
+
+async def test_b_and_watchlist_view_hide_the_book_and_close_its_connection(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause(0.3)
+        pane = app.query_one(DepthPane)
+        await pilot.press("b")
+        await pilot.pause(0.2)
+        assert not pane.display and pane.feed is None
+        assert not [w for w in app.workers if w.group == "book" and w.is_running]  # no hidden connection left open
+        await pilot.press("b")
+        await pilot.pause(0.2)
+        assert pane.display and pane.feed is FakeBookFeed.instances[-1] and len(FakeBookFeed.instances) == 2
+        await pilot.press("f")  # chart only: same pair, same connection
+        await pilot.pause(0.2)
+        assert pane.display and len(FakeBookFeed.instances) == 2
+        await pilot.press("f")  # watchlist only
+        await pilot.pause(0.2)
+        assert not pane.display and pane.feed is None
+        await pilot.press("b")  # book beside the watchlist; the watchlist still fills the rest
+        await pilot.pause(0.2)
+        table = app.query_one(PriceTable)
+        assert pane.display and len(FakeBookFeed.instances) == 3
+        assert table.outer_size.width + pane.outer_size.width == 149
+        assert table.virtual_size.width == table.scrollable_content_region.width
+        await pilot.press("f")  # back to split: the book stays, on the same connection
+        await pilot.pause(0.2)
+        assert pane.display and len(FakeBookFeed.instances) == 3
+        await pilot.press("f", "f", "b", "f")  # hidden again in watchlist view, split still shows it
+        await pilot.pause(0.2)
+        assert pane.display and len(FakeBookFeed.instances) == 4
+
+
+async def test_book_pane_draws_levels_spread_depth_and_tape(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause(0.3)
+        pane, feed = app.query_one(DepthPane), FakeBookFeed.instances[-1]
+        assert pane.render().plain.splitlines()[1] == "loading book…"
+        feed.handle({"type": "snapshot", "product_id": "BTC-USD", "bids": [["100.04", "1.5"], ["99.97", "0.5"]],
+                     "asks": [["100.11", "0.5"], ["100.12", "1"], ["100.19", "0.00000001"]]})
+        for trade_id, side, size in ((6, "sell", "0.25"), (7, "sell", "0.5"), (9, "buy", "0.25")):
+            feed.handle({"type": "match", "trade_id": trade_id, "side": side, "price": "100.11", "size": size,
+                         "product_id": "BTC-USD", "time": "2026-10-09T23:13:41.322560Z"})
+
+        def screen():
+            lines = pane.render().split("\n")
+            return lines, [line.plain for line in lines]
+
+        lines, plain = screen()
+        assert plain[0] == "BTC-USD book · by 0.01"  # ~$100 pair: 1 bp is one cent, so it opens ungrouped
+        middle = plain.index(next(p for p in plain if "spread" in p))
+        assert plain[middle - 3:middle + 3] == [
+            "          100.19        0.00000001",  # 1e-8 still shows: never rounded to 0
+            "          100.12        1.00000000",
+            "          100.11        0.50000000",  # best ask right above the spread
+            "─────── spread 0.07 · 7 bp ───────",
+            "          100.04        1.50000000",
+            "           99.97        0.50000000"]
+        deepest_bid = lines[middle + 2]  # 2.0 total on the bid side is the deepest: its bar spans the whole row
+        assert any(s.start == 0 and s.end == pane.size.width and "on " in str(s.style) for s in deepest_bid.spans)
+
+        tape = plain[plain.index(next(p for p in plain if p.startswith("trades"))):]
+        assert tape[0] == "trades  last 1m: 75% buys"  # 0.75 of 1.0 bought (resting sells hit)
+        assert tape[2:5] == ["23:13:41     100.11  0.25000000   ",  # newest first: resting buy hit = a sale
+                             "············ 1 missed ············",  # trade 8 never arrived
+                             "23:13:41     100.11  0.75000000 ×2"]  # 6 and 7: same second, side and price
+        assert RED in str(lines[plain.index(tape[2])].spans[-1].style)
+
+        await pilot.press("g")  # group by 0.05: asks round up, bids round down, sizes add up
+        lines, plain = screen()
+        middle = plain.index(next(p for p in plain if "spread" in p))
+        assert plain[0] == "BTC-USD book · by 0.05"
+        assert plain[middle - 2:middle + 3] == [
+            "          100.20        0.00000001",
+            "          100.15        1.50000000",
+            "─────── spread 0.07 · 7 bp ───────",  # the real spread, not the grouped one
+            "          100.00        1.50000000",
+            "           99.95        0.50000000"]
+        for _ in range(3):
+            await pilot.press("g")  # 0.10, 0.50, then back to ungrouped
+        assert pane.render().plain.splitlines()[0] == "BTC-USD book · by 0.01"
+        await pilot.press("g", "down")
+        await pilot.pause(0.3)
+        assert pane.group is None  # the next pair opens at its own default
+
+        feed = FakeBookFeed.instances[-1]
+        feed.last_msg = 0.0  # no frame for a long time: the book is hidden, not shown stale
+        assert pane.render().plain.splitlines()[1].startswith("STALE: no data for")
+        feed._status("reconnecting in 2s (boom)")
+        assert pane.render().plain.splitlines()[1] == "reconnecting in 2s (boom)"
+
+
+async def test_narrow_terminal_starts_with_the_book_hidden(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause(0.3)
+        pane = app.query_one(DepthPane)
+        assert not pane.display and not FakeBookFeed.instances
+        await pilot.press("b")
+        await pilot.pause(0.3)
+        assert pane.display and [f.symbol for f in FakeBookFeed.instances] == ["BTC-USD"]
+
+
+async def test_watchlist_fits_its_content_and_sparkline_fills_when_alone(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause(0.3)
+        table, feed = app.query_one(PriceTable), FakeFeed.instances[-1]
+        before = table.outer_size.width
+        for i in range(60):
+            feed.on_tick(Tick("BTC-USD", 100_000.0 + i, 90_000.0))
+        await pilot.pause(0.2)
+        assert table.outer_size.width > before  # "100,059.00" is wider than the placeholder: the table grew to fit
+        assert len(table.get_cell("BTC-USD", "spark").plain) == 20
+        await pilot.press("f", "f")  # watchlist only
+        await pilot.pause(0.2)
+        spark = table.get_cell("BTC-USD", "spark").plain
+        assert len(spark) > 20 and spark.rstrip() == spark[:60]  # all 60 ticks shown, then room for more
+        assert table.virtual_size.width == table.scrollable_content_region.width
+
+
+async def test_count_column_grows_so_counts_are_never_cut(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause(0.3)
+        pane, feed = app.query_one(DepthPane), FakeBookFeed.instances[-1]
+        feed.handle({"type": "snapshot", "product_id": "BTC-USD", "bids": [["100.00", "1"]], "asks": [["100.10", "1"]]})
+        for i in range(295):
+            feed.handle({"type": "match", "trade_id": i, "side": "sell", "price": "100.10", "size": "0.25",
+                         "product_id": "BTC-USD", "time": "2026-10-09T23:13:41.322560Z"})
+        line = next(line for line in pane.render().split("\n") if "×" in line.plain)
+        assert line.plain.endswith("×295") and line.cell_len == pane.size.width

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 import os
@@ -15,10 +16,11 @@ from textual.widgets import Input, Static
 
 from .alerts import KINDS, Alert, desktop_notify, valid_alert, valid_level
 from .alerts import check as check_alerts
-from .feed import Feed, Tick
+from .book import BookFeed
+from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
 from .theme import AMBER
-from .widgets import INDICATORS, ChartPane, PairPicker, PriceTable, fmt_price
+from .widgets import INDICATORS, ChartPane, DepthPane, PairPicker, PriceTable, fmt_price
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "crypto-terminal"
 WATCHLIST_FILE = CONFIG_DIR / "watchlist.json"
@@ -26,9 +28,10 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 ALERTS_FILE = CONFIG_DIR / "alerts.json"
 DEFAULT_WATCHLIST = ["BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD"]
 QUERY_RE = re.compile(r"[A-Z0-9]{1,20}")  # coin search: `add sol`, `add solana`
-STALE_AFTER = 10  # seconds without any feed frame before the status line shows STALE
 ZOOMS = (1, 2, 4)  # chart columns per candle
 VIEWS = ("split", "chart", "watchlist")  # `f` cycles through these
+BOOK_MIN_WIDTH = 140  # narrower terminals start with the book hidden so the chart keeps its room (`b` shows it)
+BOOK_DELAY = 0.3  # seconds a pair must stay selected before its book (a ~1 MB snapshot) is requested
 
 
 # ── Watchlist, config + commands ──────────────────────────────────────────────
@@ -149,9 +152,9 @@ class TerminalApp(App):
     CSS = """
     Screen { background: black; }
     #title { height: 1; padding: 0 1; background: #ffb000; color: black; text-style: bold; }
-    #main { height: 1fr; }
+    #main { height: 1fr; padding-right: 1; }  /* macOS overlay scrollbars cover the last column */
     #bar { height: 1; color: #ffb000; }
-    PriceTable { width: 65; height: 1fr; background: black; border-right: solid #ffb000; }
+    PriceTable { width: auto; height: 1fr; background: black; border-right: solid #ffb000; }
     PriceTable.alone { width: 1fr; border-right: none; }
     PriceTable > .datatable--header { background: black; color: #ffb000; text-style: bold; }
     PriceTable > .datatable--cursor { background: #3a2a00; }
@@ -168,16 +171,19 @@ class TerminalApp(App):
         ("plus,equals_sign", "zoom(1)", "Zoom in"),
         ("minus", "zoom(-1)", "Zoom out"),
         ("f", "cycle_view", "Split / chart / watchlist"),
+        ("b", "toggle_book", "Order book + trades"),
+        ("g", "group_book", "Group book prices"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Static("CRYPTO TERMINAL · COINBASE SPOT · [1-6] or [ ] timeframe · [+ -] zoom · [f] view · "
-                     "[/] command", id="title", markup=False)
+                     "[b] book [g] group · [/] command", id="title", markup=False)
         with Horizontal(id="main"):
             yield PriceTable(id="watchlist")
             with Vertical(id="chart-col"):
                 yield Static(id="bar", markup=False)
                 yield ChartPane(id="chart")
+            yield DepthPane(id="depth")
         yield Input(placeholder="add SOL-USD · add solana · rm ADA-USD · ind sma20 ema50 vwap rsi · ind off · "
                                 "alert BTC-USD > 90000 · alerts · unalert 1 · quit   (esc closes)", id="cmd")
         yield Static(id="status", markup=False)  # status carries server text: never parse it as markup
@@ -192,6 +198,8 @@ class TerminalApp(App):
         self.selected: str | None = None
         self.timeframe = "1"
         self.view = "split"
+        self.show_book = self.size.width >= BOOK_MIN_WIDTH  # split and chart views
+        self.book_beside_watchlist = False  # watchlist view: `b` adds the book beside it
         table = self.query_one(PriceTable)
         table.set_symbols(self.symbols)
         table.focus()
@@ -203,6 +211,13 @@ class TerminalApp(App):
         self.load_products()
         self.set_interval(1, self.refresh_status)
         self.refresh_status()
+
+    def on_resize(self):
+        # Terminal.app keeps the old characters past the right edge when its window narrows and shows them in the
+        # sliver beside the last column; clearing the whole screen before the repaint wipes them
+        if self._driver is not None:
+            self._driver.write("\x1b[2J")
+        self.screen.refresh(layout=True)
 
     async def on_unmount(self):
         await self.http.aclose()
@@ -263,6 +278,7 @@ class TerminalApp(App):
         self.selected = event.row_key.value
         self.refresh_bar()
         self.load_chart()
+        self.restart_book()
 
     def action_timeframe(self, key: str):
         self.timeframe = key
@@ -289,6 +305,43 @@ class TerminalApp(App):
         table.display = self.view != "chart"
         table.set_class(self.view == "watchlist", "alone")
         self.query_one("#chart-col").display = self.view != "watchlist"
+        if self.query_one(DepthPane).display != self.book_wanted:  # split <-> chart keeps the open connection
+            self.restart_book()
+
+    # ── order book + trades ──
+
+    def action_group_book(self):
+        self.query_one(DepthPane).cycle_group()
+
+    def action_toggle_book(self):
+        if self.view == "watchlist":
+            self.book_beside_watchlist = not self.book_beside_watchlist
+        else:
+            self.show_book = not self.show_book
+        self.restart_book()
+
+    @property
+    def book_wanted(self) -> bool:
+        return self.book_beside_watchlist if self.view == "watchlist" else self.show_book
+
+    def restart_book(self):
+        """One book connection, for the selected pair, only while the pane is visible."""
+        pane = self.query_one(DepthPane)
+        pane.display = self.book_wanted
+        if pane.symbol != self.selected:
+            pane.group = None  # each pair opens at its own default grouping
+        pane.symbol, pane.feed = self.selected, None  # never show the previous pair's book, even for a moment
+        if pane.display and self.selected in self.symbols:
+            self.run_book(self.selected)
+        else:
+            self.workers.cancel_group(self, "book")
+
+    @work(exclusive=True, group="book")
+    async def run_book(self, symbol: str):
+        pane = self.query_one(DepthPane)  # before the wait: the app may be closing when it ends
+        await asyncio.sleep(BOOK_DELAY)  # scrolling through the watchlist cancels this before anything is fetched
+        feed = pane.feed = BookFeed(symbol)
+        await feed.run()
 
     def refresh_bar(self):
         bar = Text(f" {self.selected or '—'} │ ")
@@ -413,3 +466,4 @@ class TerminalApp(App):
         self.restart_feed()
         if not self.symbols:
             self.load_chart()
+            self.restart_book()
