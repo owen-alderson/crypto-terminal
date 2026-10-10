@@ -342,7 +342,7 @@ async def test_zoom_redraws_without_fetching_and_f_cycles_views(offline, monkeyp
         assert not table.display and column.display and visible() > counts[1]
         await pilot.press("f")  # watchlist only, stretched across the screen: the sparkline takes the spare width
         await pilot.pause()
-        assert table.display and not column.display and table.outer_size.width == 150
+        assert table.display and not column.display and table.outer_size.width == 149  # 1 column kept for the scrollbar
         assert table.virtual_size.width == table.scrollable_content_region.width  # no blank columns at the side
         await pilot.press("f")  # back to split: the watchlist is only as wide as its columns
         await pilot.pause()
@@ -383,9 +383,18 @@ async def test_b_and_watchlist_view_hide_the_book_and_close_its_connection(offli
         await pilot.press("f")  # watchlist only
         await pilot.pause(0.2)
         assert not pane.display and pane.feed is None
-        await pilot.press("f")  # back to split: the book comes back
+        await pilot.press("b")  # book beside the watchlist; the watchlist still fills the rest
+        await pilot.pause(0.2)
+        table = app.query_one(PriceTable)
+        assert pane.display and len(FakeBookFeed.instances) == 3
+        assert table.outer_size.width + pane.outer_size.width == 149
+        assert table.virtual_size.width == table.scrollable_content_region.width
+        await pilot.press("f")  # back to split: the book stays, on the same connection
         await pilot.pause(0.2)
         assert pane.display and len(FakeBookFeed.instances) == 3
+        await pilot.press("f", "f", "b", "f")  # hidden again in watchlist view, split still shows it
+        await pilot.pause(0.2)
+        assert pane.display and len(FakeBookFeed.instances) == 4
 
 
 async def test_book_pane_draws_levels_spread_depth_and_tape(offline):

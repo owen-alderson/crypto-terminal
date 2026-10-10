@@ -52,7 +52,7 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `[` `]` | Shorter / longer candles |
 | `+` `-` | Zoom: 4, 2 or 1 columns per candle |
 | `f` | Cycle the view: split → chart only → watchlist only (the watchlist is only as wide as its columns; alone, its sparkline stretches to fill the width) |
-| `b` | Hide / show the order book and trade tape |
+| `b` | Hide / show the order book and trade tape (in watchlist-only view, adds it beside the watchlist) |
 | `g` | Group book prices more coarsely (wraps back to ungrouped) |
 | `/` or `:` | Open command bar (`esc` closes it) |
 | `ctrl+q` | Quit |

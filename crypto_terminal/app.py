@@ -152,7 +152,7 @@ class TerminalApp(App):
     CSS = """
     Screen { background: black; }
     #title { height: 1; padding: 0 1; background: #ffb000; color: black; text-style: bold; }
-    #main { height: 1fr; }
+    #main { height: 1fr; padding-right: 1; }  /* macOS overlay scrollbars cover the last column */
     #bar { height: 1; color: #ffb000; }
     PriceTable { width: auto; height: 1fr; background: black; border-right: solid #ffb000; }
     PriceTable.alone { width: 1fr; border-right: none; }
@@ -198,7 +198,8 @@ class TerminalApp(App):
         self.selected: str | None = None
         self.timeframe = "1"
         self.view = "split"
-        self.show_book = self.size.width >= BOOK_MIN_WIDTH
+        self.show_book = self.size.width >= BOOK_MIN_WIDTH  # split and chart views
+        self.book_beside_watchlist = False  # watchlist view: `b` adds the book beside it
         table = self.query_one(PriceTable)
         table.set_symbols(self.symbols)
         table.focus()
@@ -313,12 +314,15 @@ class TerminalApp(App):
         self.query_one(DepthPane).cycle_group()
 
     def action_toggle_book(self):
-        self.show_book = not self.show_book
+        if self.view == "watchlist":
+            self.book_beside_watchlist = not self.book_beside_watchlist
+        else:
+            self.show_book = not self.show_book
         self.restart_book()
 
     @property
     def book_wanted(self) -> bool:
-        return self.show_book and self.view != "watchlist"
+        return self.book_beside_watchlist if self.view == "watchlist" else self.show_book
 
     def restart_book(self):
         """One book connection, for the selected pair, only while the pane is visible."""
@@ -334,8 +338,9 @@ class TerminalApp(App):
 
     @work(exclusive=True, group="book")
     async def run_book(self, symbol: str):
+        pane = self.query_one(DepthPane)  # before the wait: the app may be closing when it ends
         await asyncio.sleep(BOOK_DELAY)  # scrolling through the watchlist cancels this before anything is fetched
-        feed = self.query_one(DepthPane).feed = BookFeed(symbol)
+        feed = pane.feed = BookFeed(symbol)
         await feed.run()
 
     def refresh_bar(self):
