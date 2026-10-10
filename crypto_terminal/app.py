@@ -154,7 +154,7 @@ class TerminalApp(App):
     #title { height: 1; padding: 0 1; background: #ffb000; color: black; text-style: bold; }
     #main { height: 1fr; }
     #bar { height: 1; color: #ffb000; }
-    PriceTable { width: 65; height: 1fr; background: black; border-right: solid #ffb000; }
+    PriceTable { width: auto; height: 1fr; background: black; border-right: solid #ffb000; }
     PriceTable.alone { width: 1fr; border-right: none; }
     PriceTable > .datatable--header { background: black; color: #ffb000; text-style: bold; }
     PriceTable > .datatable--cursor { background: #3a2a00; }
@@ -210,6 +210,13 @@ class TerminalApp(App):
         self.load_products()
         self.set_interval(1, self.refresh_status)
         self.refresh_status()
+
+    def on_resize(self):
+        # Terminal.app keeps the old characters past the right edge when its window narrows and shows them in the
+        # sliver beside the last column; clearing the whole screen before the repaint wipes them
+        if self._driver is not None:
+            self._driver.write("\x1b[2J")
+        self.screen.refresh(layout=True)
 
     async def on_unmount(self):
         await self.http.aclose()

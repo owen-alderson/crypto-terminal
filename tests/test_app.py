@@ -340,12 +340,14 @@ async def test_zoom_redraws_without_fetching_and_f_cycles_views(offline, monkeyp
         await pilot.press("f")  # chart only: the chart gets the whole width
         await pilot.pause()
         assert not table.display and column.display and visible() > counts[1]
-        await pilot.press("f")  # watchlist only, stretched across the screen
+        await pilot.press("f")  # watchlist only, stretched across the screen: the sparkline takes the spare width
         await pilot.pause()
         assert table.display and not column.display and table.outer_size.width == 150
-        await pilot.press("f")  # back to split
+        assert table.virtual_size.width == table.scrollable_content_region.width  # no blank columns at the side
+        await pilot.press("f")  # back to split: the watchlist is only as wide as its columns
         await pilot.pause()
-        assert table.display and column.display and table.outer_size.width == 65
+        widths = sum(c.get_render_width(table) for c in table.columns.values())
+        assert table.display and column.display and table.outer_size.width == widths + 1  # + its border
         assert visible() == counts[1] and len(fetches) == 1
 
 
@@ -455,3 +457,34 @@ async def test_narrow_terminal_starts_with_the_book_hidden(offline):
         await pilot.press("b")
         await pilot.pause(0.3)
         assert pane.display and [f.symbol for f in FakeBookFeed.instances] == ["BTC-USD"]
+
+
+async def test_watchlist_fits_its_content_and_sparkline_fills_when_alone(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause(0.3)
+        table, feed = app.query_one(PriceTable), FakeFeed.instances[-1]
+        before = table.outer_size.width
+        for i in range(60):
+            feed.on_tick(Tick("BTC-USD", 100_000.0 + i, 90_000.0))
+        await pilot.pause(0.2)
+        assert table.outer_size.width > before  # "100,059.00" is wider than the placeholder: the table grew to fit
+        assert len(table.get_cell("BTC-USD", "spark").plain) == 20
+        await pilot.press("f", "f")  # watchlist only
+        await pilot.pause(0.2)
+        spark = table.get_cell("BTC-USD", "spark").plain
+        assert len(spark) > 20 and spark.rstrip() == spark[:60]  # all 60 ticks shown, then room for more
+        assert table.virtual_size.width == table.scrollable_content_region.width
+
+
+async def test_count_column_grows_so_counts_are_never_cut(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await pilot.pause(0.3)
+        pane, feed = app.query_one(DepthPane), FakeBookFeed.instances[-1]
+        feed.handle({"type": "snapshot", "product_id": "BTC-USD", "bids": [["100.00", "1"]], "asks": [["100.10", "1"]]})
+        for i in range(295):
+            feed.handle({"type": "match", "trade_id": i, "side": "sell", "price": "100.10", "size": "0.25",
+                         "product_id": "BTC-USD", "time": "2026-10-09T23:13:41.322560Z"})
+        line = next(line for line in pane.render().split("\n") if "×" in line.plain)
+        assert line.plain.endswith("×295") and line.cell_len == pane.size.width

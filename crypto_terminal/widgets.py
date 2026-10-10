@@ -17,7 +17,8 @@ from .indicators import ema, sma, vwap
 from .theme import AMBER, AXIS, GREEN, RED, VOL_GREEN, VOL_RED
 
 SPARK = "▁▂▃▄▅▆▇█"
-SPARK_LEN = 20
+SPARK_LEN = 20  # ticks shown beside the chart; the watchlist-only view stretches the sparkline to fill the width
+SPARK_HISTORY = 500
 FLASH_SECONDS = 0.5
 UP, DOWN = GREEN, RED
 REDRAW_EVERY = 0.25  # live candle redraws at most four times a second
@@ -40,13 +41,13 @@ def sparkline(values) -> str:
 
 
 class PriceTable(DataTable):
-    """Watchlist: one row per pair, price flashes green/red on each up/down tick."""
+    """Watchlist: one row per pair, price flashes green/red on each up/down tick.
+    Columns fit their content, so the table is only as wide as it needs to be."""
 
     def on_mount(self):
         self.cursor_type = "row"
-        for label, key, width in (("PAIR", "sym", 13), ("LAST", "last", 12), ("24H %", "chg", 10),
-                                  ("TICKS", "spark", SPARK_LEN)):
-            self.add_column(label, key=key, width=width)
+        for label, key in (("PAIR", "sym"), ("LAST", "last"), ("24H %", "chg"), ("TICKS", "spark")):
+            self.add_column(label, key=key)
         self._last: dict[str, Tick] = {}
         self._dir: dict[str, str] = {}
         self._spark: dict[str, deque] = {}
@@ -60,13 +61,13 @@ class PriceTable(DataTable):
                     d.pop(sym, None)
         for sym in symbols:
             if sym not in self._spark:
-                self._spark[sym] = deque(maxlen=SPARK_LEN)
-                self.add_row(Text(sym, style="bold"), "—", "—", "", key=sym)
+                self._spark[sym] = deque(maxlen=SPARK_HISTORY)
+                self.add_row(Text(sym, style="bold"), "—", "—", " " * self.spark_len(), key=sym)
 
     def set_alerts(self, symbols: set[str]):
         """Mark pairs that have an alert set."""
         for sym in self._spark:
-            self.update_cell(sym, "sym", Text(f"{sym} 🔔" if sym in symbols else sym, style="bold"))
+            self.update_cell(sym, "sym", Text(f"{sym} 🔔" if sym in symbols else sym, style="bold"), update_width=True)
 
     def last_price(self, sym: str) -> float | None:
         return self._last[sym].price if sym in self._last else None
@@ -84,9 +85,28 @@ class PriceTable(DataTable):
                 self._flashing.add(sym)
                 self.set_timer(FLASH_SECONDS, lambda: self._unflash(sym))
         pct = (tick.price - tick.open_24h) / tick.open_24h * 100
-        self.update_cell(sym, "chg", Text(f"{'▲' if pct >= 0 else '▼'} {pct:+.2f}%", style=UP if pct >= 0 else DOWN))
-        self.update_cell(sym, "spark", Text(sparkline(self._spark[sym]), style="dark_orange"))
+        self.update_cell(sym, "chg", Text(f"{'▲' if pct >= 0 else '▼'} {pct:+.2f}%", style=UP if pct >= 0 else DOWN),
+                         update_width=True)
+        self._render_spark(sym)
         self._render_price(sym)
+
+    def spark_len(self) -> int:
+        """20 ticks beside the chart; alone, whatever width the other columns leave, so no space sits blank."""
+        if not self.has_class("alone"):
+            return SPARK_LEN
+        others = sum(c.get_render_width(self) for key, c in self.columns.items() if key != "spark")
+        return max(SPARK_LEN, self.scrollable_content_region.width - others - 2 * self.cell_padding)
+
+    def on_resize(self):
+        for sym in self._spark:
+            self._render_spark(sym)
+
+    def _render_spark(self, sym: str):
+        n = self.spark_len()
+        ticks = list(self._spark[sym])[-n:]
+        # padded to n so the column (and the table) keeps its width while ticks arrive
+        text = f"{sparkline(ticks) if ticks else '':<{n}}"
+        self.update_cell(sym, "spark", Text(text, style="dark_orange"), update_width=True)
 
     def _unflash(self, sym: str):
         self._flashing.discard(sym)
@@ -96,7 +116,8 @@ class PriceTable(DataTable):
     def _render_price(self, sym: str):
         color = self._dir.get(sym, "white")
         style = f"bold black on {color}" if sym in self._flashing else f"bold {color}"
-        self.update_cell(sym, "last", Text(fmt_price(self._last[sym].price), style=style, justify="right"))
+        self.update_cell(sym, "last", Text(fmt_price(self._last[sym].price), style=style, justify="right"),
+                         update_width=True)
 
 
 class PairPicker(ModalScreen[str | None]):
@@ -278,12 +299,13 @@ class DepthPane(Widget):
         big = big_threshold(recent)
         shown = recent[:max(0, rows - 2)]
         dp = max(t.dp for t in shown)
-        price_w = (width - 13) // 2
-        size_w = width - 13 - price_w
+        count_w = max(3, *(len(f" ×{t.count}") for t in shown))  # ×295 must never be cut to ×29
+        price_w = (width - 10 - count_w) // 2
+        size_w = width - 10 - count_w - price_w
         for trade, size_text in zip(shown, fmt_sizes([t.size for t in shown], size_w)):
             colour = GREEN if trade.buy else RED
             count = f"×{trade.count}" if trade.count > 1 else ""
-            body = f" {trade.price:>{price_w},.{dp}f} {size_text:>{size_w}}{count:>3}"
+            body = f" {trade.price:>{price_w},.{dp}f} {size_text:>{size_w}}{count:>{count_w}}"
             if trade.price * trade.size > big:  # bigger than 98% of recent prints
                 line = Text(trade.time + body, style=f"bold black on {colour}")
             else:
