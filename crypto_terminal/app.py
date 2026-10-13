@@ -14,18 +14,18 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, Static
 
-from .alerts import KINDS, Alert, desktop_notify, valid_alert, valid_level
-from .alerts import check as check_alerts
+from .alerts import Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
 from .book import BookFeed
 from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
 from .theme import AMBER
-from .widgets import INDICATORS, ChartPane, DepthPane, PairPicker, PriceTable, fmt_price
+from .widgets import INDICATORS, ChartPane, DepthPane, PairPicker, PriceTable
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "crypto-terminal"
 WATCHLIST_FILE = CONFIG_DIR / "watchlist.json"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 ALERTS_FILE = CONFIG_DIR / "alerts.json"
+WATCH_PID_FILE = CONFIG_DIR / "watch.pid"  # present while `crypto-terminal watch` runs
 DEFAULT_WATCHLIST = ["BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD"]
 QUERY_RE = re.compile(r"[A-Z0-9]{1,20}")  # coin search: `add sol`, `add solana`
 ZOOMS = (1, 2, 4)  # chart columns per candle
@@ -59,17 +59,33 @@ def save_watchlist(symbols: list[str]):
     write_json(WATCHLIST_FILE, {"symbols": symbols})
 
 
-def load_indicators() -> list[str]:
+def load_config() -> dict:
     try:
         data = json.loads(CONFIG_FILE.read_text())
     except (OSError, ValueError):
-        return []
-    names = data.get("indicators") if isinstance(data, dict) else None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def update_config(**changes):
+    write_json(CONFIG_FILE, {**load_config(), **changes})  # keeps the other settings
+
+
+def load_indicators() -> list[str]:
+    names = load_config().get("indicators")
     return [n for n in INDICATORS if isinstance(names, list) and n in names]
 
 
 def save_indicators(names):
-    write_json(CONFIG_FILE, {"indicators": [n for n in INDICATORS if n in names]})
+    update_config(indicators=[n for n in INDICATORS if n in names])
+
+
+def load_push() -> str | None:
+    url = load_config().get("push")
+    try:
+        return push_url(url) if isinstance(url, str) else None
+    except ValueError:
+        return None
 
 
 def load_alerts() -> list[Alert]:
@@ -80,7 +96,8 @@ def load_alerts() -> list[Alert]:
     out = []
     for a in data if isinstance(data, list) else []:
         try:
-            alert = Alert(a["symbol"], a["kind"], float(a["level"]), None if a.get("ref") is None else float(a["ref"]))
+            alert = Alert(a["symbol"], a["kind"], float(a["level"]), None if a.get("ref") is None else float(a["ref"]),
+                          a.get("window"))
         except (TypeError, KeyError, ValueError, AttributeError):
             continue
         if valid_alert(alert):
@@ -92,12 +109,29 @@ def save_alerts(alerts: list[Alert]):
     write_json(ALERTS_FILE, [vars(a) for a in alerts])
 
 
-ALERT_USAGE = "usage: alert BTC-USD > 90000 · alert BTC-USD < 80000 · alert BTC-USD move 5%"
+def alerts_mtime() -> int | None:
+    try:
+        return ALERTS_FILE.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def watch_pid() -> int | None:
+    """pid of a running `crypto-terminal watch`, if any (a pid file left by a crash doesn't count)."""
+    try:
+        pid = int(WATCH_PID_FILE.read_text())
+        os.kill(pid, 0)
+    except PermissionError:
+        return pid  # alive, owned by another user
+    except (OSError, ValueError):
+        return None
+    return pid
 
 
 def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]:
     """`add SOL-USD` -> ("add", "SOL-USD"), `add sol` -> ("find", "SOL"), `ind rsi` -> ("ind", ["rsi"]),
-    `alert BTC-USD > 90000` -> ("alert", Alert(...)), `unalert 2` -> ("unalert", 2), `quit` -> ("quit", None).
+    `alert BTC-USD > 90000` -> ("alert", Alert(...)), `unalert 2` -> ("unalert", 2), `quit` -> ("quit", None),
+    `push mytopic` -> ("push", "https://ntfy.sh/mytopic"), `push off` -> ("push", ""), `push` -> ("push", None).
 
     Raises ValueError with a user-facing message.
     """
@@ -124,16 +158,11 @@ def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]
             raise ValueError(f"usage: ind {' '.join(INDICATORS)} (toggles) or ind off")
         return "ind", names
     if cmd == "alert":
-        if len(args) != 3 or not SYMBOL_RE.fullmatch(args[0].upper()) or args[1].lower() not in KINDS:
-            raise ValueError(ALERT_USAGE)
-        kind = args[1].lower()
-        try:
-            level = float(args[2].removesuffix("%") if kind == "move" else args[2])
-        except ValueError:
-            level = math.nan
-        if not valid_level(kind, level):
-            raise ValueError("move must be between 0 and 100%" if kind == "move" else "price must be a positive number")
-        return "alert", Alert(args[0].upper(), kind, level)
+        return "alert", parse_alert(args)
+    if cmd == "push" and len(args) <= 1:
+        if not args:
+            return "push", None
+        return "push", "" if args[0].lower() == "off" else push_url(args[0])
     if cmd == "alerts" and not args:
         return "alerts", None
     if cmd == "unalert":
@@ -144,7 +173,7 @@ def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]
         if index < 1:
             raise ValueError("usage: unalert N (numbers from `alerts`)")
         return "unalert", index
-    raise ValueError(f"unknown command: {text.strip()} (try add / rm / ind / alert / alerts / unalert / quit)")
+    raise ValueError(f"unknown command: {text.strip()} (try add / rm / ind / alert / alerts / unalert / push / quit)")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -187,7 +216,8 @@ class TerminalApp(App):
                 yield ChartPane(id="chart")
             yield DepthPane(id="depth")
         yield Input(placeholder="add SOL-USD · add solana · rm ADA-USD · ind sma20 ema50 vwap rsi · ind off · "
-                                "alert BTC-USD > 90000 · alerts · unalert 1 · quit   (esc closes)", id="cmd")
+                                "alert BTC-USD > 90000 · alert BTC-USD print 500k · alerts · unalert 1 · push mytopic · "
+                                "quit   (esc closes)", id="cmd")
         yield Static(id="status", markup=False)  # status carries server text: never parse it as markup
 
     def on_mount(self):
@@ -206,7 +236,10 @@ class TerminalApp(App):
         table.set_symbols(self.symbols)
         table.focus()
         self.query_one(ChartPane).set_indicators(load_indicators())
-        self.alerts = load_alerts()
+        self.watcher = Watcher(load_alerts())
+        self.alerts_seen = alerts_mtime()  # the file's version we hold: another process may change it
+        self.watch = watch_pid()
+        self.push = load_push()
         table.set_alerts({a.symbol for a in self.alerts})
         self.refresh_bar()
         self.restart_feed()
@@ -221,6 +254,10 @@ class TerminalApp(App):
             self._driver.write("\x1b[2J")
         self.screen.refresh(layout=True)
 
+    @property
+    def alerts(self) -> list[Alert]:
+        return self.watcher.alerts
+
     async def on_unmount(self):
         await self.http.aclose()
 
@@ -234,9 +271,14 @@ class TerminalApp(App):
             self.feed = None
             self.handle_feed_status("idle")
 
+    def trade_symbols(self) -> list[str]:
+        # trades stream only for pairs with a trade alert, and alerts only get ticks for watchlist pairs
+        return [s for s in self.watcher.trade_symbols if s in self.symbols]
+
     @work(exclusive=True, group="feed")
     async def run_feed(self):
-        self.feed = Feed(self.symbols, self.handle_tick, self.handle_feed_status)
+        self.feed = Feed(self.symbols, self.handle_tick, self.handle_feed_status,
+                         trade_symbols=self.trade_symbols(), on_trade=self.handle_trade)
         await self.feed.run()
 
     def handle_tick(self, tick: Tick):
@@ -244,28 +286,53 @@ class TerminalApp(App):
         self.query_one(PriceTable).update_tick(tick)
         if tick.symbol == self.selected:
             self.query_one(ChartPane).update_price(tick.symbol, tick.price)
-        if self.alerts:
-            fired, self.alerts = check_alerts(self.alerts, tick.symbol, tick.price)
-            if fired:
-                self.alerts_changed()
-                self.bell()
-                for alert in fired:
-                    message = f"{alert} · now {fmt_price(tick.price)}"
-                    self.notify(message, title="🔔 alert", severity="error", timeout=15)
-                    desktop_notify("crypto-terminal alert", message)
+        if self.alerts and not self.watch:  # a running `watch` checks the alerts instead, so none fires twice
+            self.deliver(self.watcher.on_tick(tick))
+
+    def handle_trade(self, symbol: str, trade):
+        if not self.watch:
+            self.deliver(self.watcher.on_trade(symbol, trade))
+
+    def deliver(self, fired: list[Fired]):
+        if not fired:
+            return
+        if any(not f.alert.repeats for f in fired):  # one-shot alerts are gone
+            self.alerts_changed()
+        self.bell()
+        for f in fired:
+            self.notify(f.message, title="🔔 alert", severity="error", timeout=15, markup=False)
+            desktop_notify("crypto-terminal alert", f.message)
+            if self.push:
+                self.send_push(f.message)
+
+    @work(group="push")
+    async def send_push(self, message: str):
+        error = await push(self.http, self.push, message)
+        if error:
+            self.notify(error, severity="error", markup=False)
 
     def handle_feed_status(self, status: str):
         self.feed_status = status
         self.refresh_status()
 
     def refresh_status(self):
+        self.sync_alerts()
         now = time.monotonic()
         state = self.feed_status.upper()
         if self.feed and self.feed_status == "live" and now - self.feed.last_msg > STALE_AFTER:
             state = "STALE"
         age = f"{now - self.last_tick:.0f}s ago" if self.last_tick else "—"
         clock = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        self.query_one("#status", Static).update(f"● {state}  │  last tick {age}  │  {clock}")
+        watch = f"  │  alerts checked by watch (pid {self.watch})" if self.watch else ""
+        self.query_one("#status", Static).update(f"● {state}  │  last tick {age}{watch}  │  {clock}")
+
+    def sync_alerts(self):
+        """Pick up alert changes made by another process (`watch` removing a fired alert, or a second terminal)."""
+        self.watch = watch_pid()
+        if alerts_mtime() != self.alerts_seen:
+            self.watcher.set_alerts(load_alerts())
+            self.alerts_seen = alerts_mtime()
+            self.alerts_marked()
 
     @work(exclusive=True, group="products")
     async def load_products(self):
@@ -401,7 +468,10 @@ class TerminalApp(App):
         elif cmd == "alert":
             self.add_alert(arg)
         elif cmd == "alerts":
-            self.notify("\n".join(f"{i}. {a}" for i, a in enumerate(self.alerts, 1)) or "no alerts", markup=False)
+            self.notify("\n".join(f"{i}. {self.describe(a)}" for i, a in enumerate(self.alerts, 1)) or "no alerts",
+                        markup=False)
+        elif cmd == "push":
+            self.set_push(arg)
         elif cmd == "unalert":
             if arg > len(self.alerts):
                 self.notify(f"no alert {arg} (see `alerts`)", severity="error")
@@ -442,12 +512,30 @@ class TerminalApp(App):
         else:
             self.push_screen(PairPicker(query, matches), lambda symbol: symbol and self.add_symbol(symbol))
 
+    def describe(self, alert: Alert) -> str:
+        if not alert.repeats:
+            return str(alert)
+        warming = self.watcher.warming(alert)
+        return f"{alert} ↻" + (f" (warming up: {math.ceil(warming / 60)}m of trades to go)" if warming > 0 else "")
+
+    def set_push(self, url: str | None):
+        if url is None:
+            self.notify(f"push: {self.push}" if self.push else "push is off (push <topic> turns it on)", markup=False)
+            return
+        self.push = url or None
+        update_config(push=self.push)
+        if self.push:
+            self.notify(f"push on: {self.push} · sending a test", markup=False)
+            self.send_push("crypto-terminal: push works")
+        else:
+            self.notify("push off")
+
     def add_alert(self, alert: Alert):
         # ticks only arrive for watchlist pairs, so an alert anywhere else could never fire
         if alert.symbol not in self.symbols:
             self.notify(f"{alert.symbol} is not on the watchlist: add it first", severity="error")
             return
-        if alert.kind == "move":
+        if alert.kind == "move" and not alert.window:  # a one-shot move counts from the price now
             ref = self.query_one(PriceTable).last_price(alert.symbol)
             if ref is None:
                 self.notify(f"no price for {alert.symbol} yet: try again in a moment", severity="error")
@@ -458,8 +546,16 @@ class TerminalApp(App):
         self.notify(f"alert set: {alert}", markup=False)
 
     def alerts_changed(self):
+        self.watcher.set_alerts(self.alerts)
         save_alerts(self.alerts)
+        self.alerts_seen = alerts_mtime()
+        self.alerts_marked()
+
+    def alerts_marked(self):
+        """Watchlist bells, and the trade stream for exactly the pairs with trade alerts."""
         self.query_one(PriceTable).set_alerts({a.symbol for a in self.alerts})
+        if self.feed and self.feed.trade_symbols != self.trade_symbols():
+            self.restart_feed()
 
     def watchlist_changed(self):
         save_watchlist(self.symbols)

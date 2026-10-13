@@ -77,3 +77,27 @@ async def test_server_error_triggers_reconnect_with_reason():
         task.cancel()
     assert "reconnecting in 1s (NOPE-USD is not a valid product)" in statuses
     assert "live" not in statuses
+
+
+async def test_trades_stream_only_for_trade_alert_pairs_and_skip_the_replayed_last_match():
+    def match(kind, symbol, trade_id):
+        return {"type": kind, "trade_id": trade_id, "taker_order_id": "t1", "side": "sell", "size": "0.5",
+                "price": "100", "product_id": symbol, "time": "2026-10-13T16:47:27.671220Z"}
+
+    subs = []
+
+    async def handler(ws):
+        subs.append(json.loads(await ws.recv()))
+        for msg in (match("last_match", "BTC-USD", 1), match("match", "ETH-USD", 7), match("match", "BTC-USD", 2), TICK):
+            await ws.send(json.dumps(msg))
+        await ws.wait_closed()
+
+    ticks, trades = [], []
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        feed = Feed(["BTC-USD", "ETH-USD"], ticks.append, url=f"ws://127.0.0.1:{port}",
+                    trade_symbols=["BTC-USD"], on_trade=lambda symbol, trade: trades.append((symbol, trade)))
+        await run_until(feed, ticks, 1)
+    assert subs[0]["channels"] == ["ticker", "heartbeat", {"name": "matches", "product_ids": ["BTC-USD"]}]
+    assert [(symbol, t.id, t.taker, t.buy) for symbol, t in trades] == [("BTC-USD", 2, "t1", True)]
+    assert Feed(["BTC-USD"], ticks.append).channels() == ["ticker", "heartbeat"]  # no trade alerts: no trades

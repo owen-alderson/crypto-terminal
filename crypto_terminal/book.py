@@ -43,6 +43,7 @@ class Trade:
     missed: int = 0  # trades missing just before this one (trade ids are sequential per pair)
     at: float = 0.0  # monotonic time received
     count: int = 1  # trades combined into this print (see `prints`)
+    taker: str = ""  # the taker order's id: one big order is often many fills
 
 
 def parse_trade(msg: dict) -> Trade | None:
@@ -58,7 +59,9 @@ def parse_trade(msg: dict) -> Trade | None:
     if not isinstance(trade_id, int) or side not in ("buy", "sell") or not clock:
         return None
     # `side` is the resting (maker) order's side: a resting sell was hit by a buyer
-    return Trade(trade_id, clock[1], price, size, side == "sell", decimals(raw_price))
+    taker = msg.get("taker_order_id")
+    return Trade(trade_id, clock[1], price, size, side == "sell", decimals(raw_price),
+                 taker=taker if isinstance(taker, str) and taker else f"#{trade_id}")  # no id: count it on its own
 
 
 class OrderBook:
