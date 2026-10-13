@@ -60,6 +60,7 @@ def test_alerts_roundtrip_and_bad_files(tmp_path, monkeypatch):
     saved = [Alert("BTC-USD", ">", 90000), Alert("ETH-USD", "move", 5, ref=2500)]
     save_alerts(saved)
     assert load_alerts() == saved
+    assert not path.with_name("alerts.json.tmp").exists()  # saved via a temp file, renamed into place
     for bad in ("{not json", '{"symbol": "BTC-USD"}'):
         path.write_text(bad)
         assert load_alerts() == []
