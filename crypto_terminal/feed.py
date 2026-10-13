@@ -23,6 +23,10 @@ MAX_FRAME = 32 * 2**20  # a BTC-USD order book snapshot is ~1.1 MB, over the web
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
+class Unlisted(Exception):
+    """The exchange says it doesn't list the pair: the feed stops rather than retry forever."""
+
+
 @dataclass(frozen=True)
 class Tick:
     symbol: str
@@ -58,13 +62,15 @@ class Feed:
     """Streams ticks for `symbols` forever, reconnecting with exponential backoff.
     `trade_symbols` (a subset) also stream every trade to `on_trade(symbol, Trade)`, for trade alerts.
 
-    Subclasses pick other `CHANNELS` and override `handle`.
+    Subclasses pick other `CHANNELS` (or `subscriptions` for other exchanges) and override `handle`.
 
     `status` is one of: connecting, live, reconnecting in Ns (reason).
     `last_msg` is the monotonic time of the last frame received (ticks or heartbeats).
     """
 
     CHANNELS = ("ticker", "heartbeat")
+    KEEPALIVE: str | None = None  # sent every KEEPALIVE_EVERY seconds, for exchanges that drop a silent client
+    KEEPALIVE_EVERY = 15
 
     def __init__(self, symbols: list[str], on_tick: Callable[[Tick], None],
                  on_status: Callable[[str], None] = lambda s: None, url: str = FEED_URL,
@@ -95,36 +101,56 @@ class Feed:
         trades = [{"name": "matches", "product_ids": self.trade_symbols}] if self.trade_symbols else []
         return [*self.CHANNELS, *trades]
 
+    def subscriptions(self) -> list[dict]:
+        """Messages sent after connecting."""
+        return [{"type": "subscribe", "product_ids": self.symbols, "channels": self.channels()}]
+
+    async def keepalive(self, ws):
+        while True:
+            await asyncio.sleep(self.KEEPALIVE_EVERY)
+            await ws.send(self.KEEPALIVE)
+
     async def run(self):
-        delay = 1
+        self.delay = 1
         while True:
             self.on_status("connecting")
             try:
                 async with connect(self.url, ssl=SSL_CONTEXT if self.url.startswith("wss") else None,
                                    open_timeout=10, max_size=MAX_FRAME) as ws:
-                    await ws.send(json.dumps({"type": "subscribe", "product_ids": self.symbols,
-                                              "channels": self.channels()}))
-                    live = False
-                    while True:
-                        # wait_for catches a half-open socket that never errors
-                        raw = await asyncio.wait_for(ws.recv(), self.reconnect_after)
-                        try:
-                            msg = json.loads(raw)
-                        except ValueError:
-                            continue
-                        if not isinstance(msg, dict):
-                            continue
-                        if msg.get("type") == "error":
-                            raise RuntimeError(str(msg.get("reason") or msg.get("message")))
-                        if self.handle(msg) or msg.get("type") == "heartbeat":
-                            self.last_msg = time.monotonic()
-                            if not live:
-                                # only data proves the link works, so backoff resets here, not on connect
-                                live, delay = True, 1
-                                self.on_status("live")
+                    for message in self.subscriptions():
+                        await ws.send(json.dumps(message))
+                    pinger = asyncio.create_task(self.keepalive(ws)) if self.KEEPALIVE else None
+                    try:
+                        await self.receive(ws)
+                    finally:
+                        if pinger:
+                            pinger.cancel()
             except asyncio.CancelledError:
                 raise
+            except Unlisted as e:
+                self.on_status(f"not listed ({e})")
+                return
             except Exception as e:  # network errors, closes, timeouts, server errors: all mean reconnect
-                self.on_status(f"reconnecting in {delay}s ({str(e) or type(e).__name__})")
-            await asyncio.sleep(delay + random.uniform(0, delay / 4))
-            delay = min(delay * 2, MAX_BACKOFF)
+                self.on_status(f"reconnecting in {self.delay}s ({str(e) or type(e).__name__})")
+            await asyncio.sleep(self.delay + random.uniform(0, self.delay / 4))
+            self.delay = min(self.delay * 2, MAX_BACKOFF)
+
+    async def receive(self, ws):
+        live = False
+        while True:
+            # wait_for catches a half-open socket that never errors
+            raw = await asyncio.wait_for(ws.recv(), self.reconnect_after)
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "error":
+                raise RuntimeError(str(msg.get("reason") or msg.get("message")))
+            if self.handle(msg) or msg.get("type") == "heartbeat":
+                self.last_msg = time.monotonic()
+                if not live:
+                    # only data proves the link works, so backoff resets here, not on connect
+                    live, self.delay = True, 1
+                    self.on_status("live")
