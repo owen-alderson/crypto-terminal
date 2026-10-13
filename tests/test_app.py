@@ -13,7 +13,7 @@ from crypto_terminal.book import BookFeed, Trade
 from crypto_terminal.feed import Tick
 from crypto_terminal.history import Candle, Product
 from crypto_terminal.theme import GREEN, RED
-from crypto_terminal.widgets import ChartPane, DepthPane, PairPicker, PriceTable
+from crypto_terminal.widgets import ChartPane, DepthPane, PairPicker, PriceTable, VenuesPane
 
 PRODUCTS = [Product(f"{base}-{quote}", base, quote, name) for base, name in
             (("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("XRP", "XRP"), ("SOL", "Solana"), ("ADA", "Cardano"),
@@ -560,3 +560,53 @@ async def test_alert_changes_from_another_process_are_picked_up_and_a_running_wa
         await pilot.pause(1.2)
         FakeFeed.instances[-1].on_tick(Tick("BTC-USD", 101.0, 90.0))
         assert DESKTOP == ["BTC-USD > 100.00 · now 101.00"] and app.alerts == []
+
+
+async def test_x_shows_other_exchanges_for_the_selected_pair_and_closes_them(offline, monkeypatch):
+    from crypto_terminal.venues import Binance, Kraken
+
+    made = []
+
+    def fake(cls):
+        class Fake(cls):
+            async def run(self):
+                made.append(self)
+                if self.pair == "SOL/USD":
+                    self._status("not listed (SOL/USD)")
+                    return
+                self._status("live")
+                await asyncio.Event().wait()
+        return Fake
+
+    monkeypatch.setattr(app_module, "VENUES", (fake(Kraken), fake(Binance)))
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        pane = app.query_one(VenuesPane)
+        assert not pane.display
+        await pilot.press("x")
+        await pilot.pause(0.2)
+        assert pane.display and [f.pair for f in made] == ["BTC/USD", "BTCUSDT"]
+        coinbase = FakeFeed.instances[-1]
+        assert coinbase.symbols == ["BTC-USD", "USDT-USD"]  # its own connection, with the USDT rate
+        coinbase.on_status("live")
+        coinbase.on_tick(Tick("BTC-USD", 83101.56, 83000.0, 83101.56, 83101.57))
+        kraken, binance = made
+        kraken.set_quote(83105.5, 83105.6)
+        binance.set_quote(83200.0, 83200.01)
+        text = pane.render().plain
+        assert "Kraken   83,105.50 83,105.60 +0.48" in text
+        assert "Binance₮ 83,200.00 83,200.01" in text and "waiting for Coinbase rate" in text
+        assert text.count("+") == 1  # no Binance comparison until the USDT rate is known
+        coinbase.on_tick(Tick("USDT-USD", 0.99896, 1.0, 0.99895, 0.99897))
+        text = pane.render().plain
+        assert "Binance₮ 83,200.00 83,200.01 +1.43" in text and "₮ USDT at 0.99896 USD (Coinbase)" in text
+
+        await pilot.press("down", "down", "down")  # SOL-USD
+        await pilot.pause(0.3)
+        assert [f.pair for f in made[-2:]] == ["SOL/USD", "SOLUSDT"]  # (the test's 0.05s delay opens ETH, XRP too)
+        text = pane.render().plain
+        assert "Kraken  not listed (SOL/USD)" in text and "83,105" not in text  # never the previous pair's prices
+        await pilot.press("x")
+        await pilot.pause()
+        assert not pane.display and not [w for w in app.workers if w.group == "venues" and w.is_running]
