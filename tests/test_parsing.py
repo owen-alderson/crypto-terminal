@@ -106,3 +106,20 @@ def test_indicators_config_roundtrip_and_bad_files(tmp_path, monkeypatch):
 ])
 def test_fmt_price_significant_figures(value, expected):
     assert fmt_price(value) == expected
+
+
+def test_a_save_that_dies_midway_keeps_the_old_file(tmp_path, monkeypatch):
+    path = tmp_path / "watchlist.json"
+    monkeypatch.setattr(app_module, "WATCHLIST_FILE", path)
+    save_watchlist(["BTC-USD", "ETH-USD"])
+    real_write = type(path).write_text
+
+    def dies_midway(self, text, *args, **kwargs):  # disk full / power cut: half the bytes, then an error
+        real_write(self, text[: len(text) // 2])
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(type(path), "write_text", dies_midway)
+    with pytest.raises(OSError):
+        save_watchlist(["SOL-USD"])
+    monkeypatch.undo()
+    assert json.loads(path.read_text()) == {"symbols": ["BTC-USD", "ETH-USD"]}

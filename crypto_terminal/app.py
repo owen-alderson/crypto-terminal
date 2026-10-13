@@ -38,7 +38,9 @@ BOOK_DELAY = 0.3  # seconds a pair must stay selected before its book (a ~1 MB s
 
 def write_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)  # atomic: a crash mid-save never leaves a half-written file
 
 
 def load_watchlist() -> list[str]:
