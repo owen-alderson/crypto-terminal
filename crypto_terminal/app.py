@@ -19,6 +19,7 @@ from .alerts import check as check_alerts
 from .book import BookFeed
 from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
+from .portfolio import Holding, fmt_total, parse_amount, totals
 from .theme import AMBER
 from .widgets import INDICATORS, ChartPane, DepthPane, PairPicker, PriceTable, fmt_price
 
@@ -26,6 +27,7 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") 
 WATCHLIST_FILE = CONFIG_DIR / "watchlist.json"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 ALERTS_FILE = CONFIG_DIR / "alerts.json"
+PORTFOLIO_FILE = CONFIG_DIR / "portfolio.json"
 DEFAULT_WATCHLIST = ["BTC-USD", "ETH-USD", "XRP-USD", "SOL-USD", "ADA-USD"]
 QUERY_RE = re.compile(r"[A-Z0-9]{1,20}")  # coin search: `add sol`, `add solana`
 ZOOMS = (1, 2, 4)  # chart columns per candle
@@ -38,7 +40,9 @@ BOOK_DELAY = 0.3  # seconds a pair must stay selected before its book (a ~1 MB s
 
 def write_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)  # atomic: a crash mid-save never leaves a half-written file
 
 
 def load_watchlist() -> list[str]:
@@ -90,12 +94,38 @@ def save_alerts(alerts: list[Alert]):
     write_json(ALERTS_FILE, [vars(a) for a in alerts])
 
 
+def load_portfolio() -> dict[str, Holding]:
+    try:
+        data = json.loads(PORTFOLIO_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for symbol, h in data.items() if isinstance(data, dict) else ():
+        try:
+            # str(): a hand-edited file may hold 0.5 rather than "0.5"; True, None, lists still fail parse_amount
+            holding = Holding(symbol, parse_amount(str(h["qty"])),
+                              None if h.get("cost") is None else parse_amount(str(h["cost"])))
+        except (TypeError, KeyError, ValueError, AttributeError):
+            continue
+        if SYMBOL_RE.fullmatch(symbol):
+            out[symbol] = holding
+    return out
+
+
+def save_portfolio(holdings: dict[str, Holding]):
+    # amounts saved as the strings typed, so they read back exactly
+    write_json(PORTFOLIO_FILE, {s: {"qty": str(h.qty), "cost": None if h.cost is None else str(h.cost)}
+                                for s, h in holdings.items()})
+
+
+HOLD_USAGE = "usage: hold BTC-USD 0.5 @ 62000 (quantity @ average cost; cost optional)"
 ALERT_USAGE = "usage: alert BTC-USD > 90000 · alert BTC-USD < 80000 · alert BTC-USD move 5%"
 
 
-def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]:
+def parse_command(text: str) -> tuple[str, str | list[str] | Alert | Holding | int | None]:
     """`add SOL-USD` -> ("add", "SOL-USD"), `add sol` -> ("find", "SOL"), `ind rsi` -> ("ind", ["rsi"]),
-    `alert BTC-USD > 90000` -> ("alert", Alert(...)), `unalert 2` -> ("unalert", 2), `quit` -> ("quit", None).
+    `alert BTC-USD > 90000` -> ("alert", Alert(...)), `unalert 2` -> ("unalert", 2), `quit` -> ("quit", None),
+    `hold BTC-USD 0.5 @ 62000` -> ("hold", Holding(...)), `unhold BTC-USD` -> ("unhold", "BTC-USD").
 
     Raises ValueError with a user-facing message.
     """
@@ -132,6 +162,17 @@ def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]
         if not valid_level(kind, level):
             raise ValueError("move must be between 0 and 100%" if kind == "move" else "price must be a positive number")
         return "alert", Alert(args[0].upper(), kind, level)
+    if cmd == "hold":
+        if len(args) not in (2, 4) or not SYMBOL_RE.fullmatch(args[0].upper()) or (len(args) == 4 and args[2] != "@"):
+            raise ValueError(HOLD_USAGE)
+        try:
+            return "hold", Holding(args[0].upper(), parse_amount(args[1]), parse_amount(args[3]) if len(args) == 4 else None)
+        except ValueError:
+            raise ValueError("quantity and cost must be positive numbers, e.g. hold BTC-USD 0.5 @ 62000") from None
+    if cmd == "unhold":
+        if len(args) != 1 or not SYMBOL_RE.fullmatch(args[0].upper()):
+            raise ValueError("usage: unhold BTC-USD")
+        return "unhold", args[0].upper()
     if cmd == "alerts" and not args:
         return "alerts", None
     if cmd == "unalert":
@@ -142,7 +183,7 @@ def parse_command(text: str) -> tuple[str, str | list[str] | Alert | int | None]
         if index < 1:
             raise ValueError("usage: unalert N (numbers from `alerts`)")
         return "unalert", index
-    raise ValueError(f"unknown command: {text.strip()} (try add / rm / ind / alert / alerts / unalert / quit)")
+    raise ValueError(f"unknown command: {text.strip()} (try add / rm / ind / alert / alerts / unalert / hold / unhold / quit)")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -173,11 +214,12 @@ class TerminalApp(App):
         ("f", "cycle_view", "Split / chart / watchlist"),
         ("b", "toggle_book", "Order book + trades"),
         ("g", "group_book", "Group book prices"),
+        ("p", "toggle_holdings", "Portfolio columns"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Static("CRYPTO TERMINAL · COINBASE SPOT · [1-6] or [ ] timeframe · [+ -] zoom · [f] view · "
-                     "[b] book [g] group · [/] command", id="title", markup=False)
+                     "[b] book [g] group · [p] portfolio · [/] command", id="title", markup=False)
         with Horizontal(id="main"):
             yield PriceTable(id="watchlist")
             with Vertical(id="chart-col"):
@@ -185,7 +227,8 @@ class TerminalApp(App):
                 yield ChartPane(id="chart")
             yield DepthPane(id="depth")
         yield Input(placeholder="add SOL-USD · add solana · rm ADA-USD · ind sma20 ema50 vwap rsi · ind off · "
-                                "alert BTC-USD > 90000 · alerts · unalert 1 · quit   (esc closes)", id="cmd")
+                                "alert BTC-USD > 90000 · alerts · unalert 1 · hold BTC-USD 0.5 @ 62000 · unhold BTC-USD · "
+                                "quit   (esc closes)", id="cmd")
         yield Static(id="status", markup=False)  # status carries server text: never parse it as markup
 
     def on_mount(self):
@@ -206,6 +249,9 @@ class TerminalApp(App):
         self.query_one(ChartPane).set_indicators(load_indicators())
         self.alerts = load_alerts()
         table.set_alerts({a.symbol for a in self.alerts})
+        self.holdings = load_portfolio()
+        self.show_holdings = bool(self.holdings)
+        table.set_holdings(self.holdings, self.show_holdings)
         self.refresh_bar()
         self.restart_feed()
         self.load_products()
@@ -263,7 +309,11 @@ class TerminalApp(App):
             state = "STALE"
         age = f"{now - self.last_tick:.0f}s ago" if self.last_tick else "—"
         clock = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        self.query_one("#status", Static).update(f"● {state}  │  last tick {age}  │  {clock}")
+        status = Text(f"● {state}  │  last tick {age}  │  ")
+        table = self.query_one(PriceTable)
+        for total in totals(self.holdings.values(), table.last_price):
+            status.append_text(fmt_total(total)).append("  │  ")
+        self.query_one("#status", Static).update(status.append(clock))
 
     @work(exclusive=True, group="products")
     async def load_products(self):
@@ -307,6 +357,10 @@ class TerminalApp(App):
         self.query_one("#chart-col").display = self.view != "watchlist"
         if self.query_one(DepthPane).display != self.book_wanted:  # split <-> chart keeps the open connection
             self.restart_book()
+
+    def action_toggle_holdings(self):
+        self.show_holdings = not self.show_holdings
+        self.query_one(PriceTable).set_holdings(self.holdings, self.show_holdings)
 
     # ── order book + trades ──
 
@@ -406,6 +460,21 @@ class TerminalApp(App):
             else:
                 self.notify(f"removed: {self.alerts.pop(arg - 1)}", markup=False)
                 self.alerts_changed()
+        elif cmd == "hold":
+            # prices only arrive for watchlist pairs, so a holding anywhere else could never be valued
+            if arg.symbol not in self.symbols:
+                self.notify(f"{arg.symbol} is not on the watchlist: add it first", severity="error")
+                return
+            self.holdings[arg.symbol] = arg
+            self.show_holdings = True
+            self.holdings_changed()
+            self.notify(f"holding {arg.qty:,f} {arg.symbol}" + ("" if arg.cost is None else f" @ {arg.cost:,f}"),
+                        markup=False)
+        elif cmd == "unhold":
+            if self.holdings.pop(arg, None) is None:
+                self.notify(f"no holding in {arg}", severity="error")
+            else:
+                self.holdings_changed()
         elif arg not in self.symbols:
             self.notify(f"{arg} is not on the watchlist", severity="error")
         else:
@@ -458,6 +527,11 @@ class TerminalApp(App):
     def alerts_changed(self):
         save_alerts(self.alerts)
         self.query_one(PriceTable).set_alerts({a.symbol for a in self.alerts})
+
+    def holdings_changed(self):
+        save_portfolio(self.holdings)
+        self.query_one(PriceTable).set_holdings(self.holdings, self.show_holdings)
+        self.refresh_status()
 
     def watchlist_changed(self):
         save_watchlist(self.symbols)

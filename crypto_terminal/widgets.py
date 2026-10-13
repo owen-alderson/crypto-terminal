@@ -14,6 +14,7 @@ from .book import BookFeed, big_threshold, default_step, flow, group_steps, prin
 from .feed import STALE_AFTER, Tick
 from .history import Candle, Product, apply_tick
 from .indicators import ema, sma, vwap
+from .portfolio import Holding, fmt_pnl
 from .theme import AMBER, AXIS, GREEN, RED, VOL_GREEN, VOL_RED
 
 SPARK = "▁▂▃▄▅▆▇█"
@@ -42,7 +43,8 @@ def sparkline(values) -> str:
 
 class PriceTable(DataTable):
     """Watchlist: one row per pair, price flashes green/red on each up/down tick.
-    Columns fit their content, so the table is only as wide as it needs to be."""
+    Columns fit their content, so the table is only as wide as it needs to be.
+    Holdings add QTY / VALUE / P&L columns (`p` toggles them)."""
 
     def on_mount(self):
         self.cursor_type = "row"
@@ -52,6 +54,7 @@ class PriceTable(DataTable):
         self._dir: dict[str, str] = {}
         self._spark: dict[str, deque] = {}
         self._flashing: set[str] = set()
+        self._holdings: dict[str, Holding] = {}
 
     def set_symbols(self, symbols: list[str]):
         for sym in list(self._spark):
@@ -62,12 +65,31 @@ class PriceTable(DataTable):
         for sym in symbols:
             if sym not in self._spark:
                 self._spark[sym] = deque(maxlen=SPARK_HISTORY)
-                self.add_row(Text(sym, style="bold"), "—", "—", " " * self.spark_len(), key=sym)
+                cells = {"sym": Text(sym, style="bold"), "spark": " " * self.spark_len()}
+                self.add_row(*(cells.get(key.value, "—") for key in self.columns), key=sym)
+                self._render_holding(sym)
 
     def set_alerts(self, symbols: set[str]):
         """Mark pairs that have an alert set."""
         for sym in self._spark:
             self.update_cell(sym, "sym", Text(f"{sym} 🔔" if sym in symbols else sym, style="bold"), update_width=True)
+
+    def set_holdings(self, holdings: dict[str, Holding], show: bool):
+        """Holding columns go before TICKS so the sparkline stays last (it stretches into spare width)."""
+        self._holdings = holdings
+        if show != ("qty" in self.columns):
+            self.remove_column("spark")
+            if show:
+                for label, key in (("QTY", "qty"), ("VALUE", "value"), ("P&L", "pnl")):
+                    self.add_column(label, key=key, default="—")
+            else:
+                for key in ("qty", "value", "pnl"):
+                    self.remove_column(key)
+            self.add_column("TICKS", key="spark", default="")
+            for sym in self._spark:
+                self._render_spark(sym)
+        for sym in self._spark:
+            self._render_holding(sym)
 
     def last_price(self, sym: str) -> float | None:
         return self._last[sym].price if sym in self._last else None
@@ -89,6 +111,7 @@ class PriceTable(DataTable):
                          update_width=True)
         self._render_spark(sym)
         self._render_price(sym)
+        self._render_holding(sym)
 
     def spark_len(self) -> int:
         """20 ticks beside the chart; alone, whatever width the other columns leave, so no space sits blank."""
@@ -107,6 +130,22 @@ class PriceTable(DataTable):
         # padded to n so the column (and the table) keeps its width while ticks arrive
         text = f"{sparkline(ticks) if ticks else '':<{n}}"
         self.update_cell(sym, "spark", Text(text, style="dark_orange"), update_width=True)
+
+    def _render_holding(self, sym: str):
+        if "qty" not in self.columns:
+            return
+        h, price = self._holdings.get(sym), self.last_price(sym)
+        cells = {"qty": "—", "value": "—", "pnl": "—"}
+        if h:
+            cells["qty"] = f"{h.qty:,f}"
+            if price is not None:
+                cells["value"] = fmt_price(h.value(price))
+                if h.cost is not None:
+                    cells["pnl"] = fmt_pnl(h.pnl(price), h.qty * h.cost)
+                    cells["pnl"].justify = "right"
+        for key, cell in cells.items():
+            self.update_cell(sym, key, Text(cell, justify="right") if isinstance(cell, str) else cell,
+                             update_width=True)
 
     def _unflash(self, sym: str):
         self._flashing.discard(sym)

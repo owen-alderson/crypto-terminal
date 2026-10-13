@@ -26,7 +26,7 @@ TIME_STEPS = (60, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800
 TOO_SMALL = "enlarge the terminal to see the chart"
 
 
-def fmt_price(value: float) -> str:
+def fmt_price(value) -> str:  # float, or a Decimal (rounded exactly, half to even)
     """2 decimals from 1,000 up, otherwise enough decimals for SIG_FIGS significant figures (0.0021300)."""
     if value >= 1_000:
         return f"{value:,.2f}"

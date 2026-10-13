@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from decimal import Decimal
 
 import pytest
 
@@ -57,6 +58,7 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "WATCHLIST_FILE", path)
     monkeypatch.setattr(app_module, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(app_module, "ALERTS_FILE", tmp_path / "alerts.json")
+    monkeypatch.setattr(app_module, "PORTFOLIO_FILE", tmp_path / "portfolio.json")
     monkeypatch.setattr(app_module, "desktop_notify", lambda title, message: DESKTOP.append(message))
     DESKTOP.clear()
     monkeypatch.setattr(app_module, "Feed", FakeFeed)
@@ -497,3 +499,49 @@ async def test_count_column_grows_so_counts_are_never_cut(offline):
                          "product_id": "BTC-USD", "time": "2026-10-09T23:13:41.322560Z"})
         line = next(line for line in pane.render().split("\n") if "×" in line.plain)
         assert line.plain.endswith("×295") and line.cell_len == pane.size.width
+
+
+async def test_hold_shows_columns_and_status_totals_and_persists(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one(PriceTable)
+        assert "qty" not in table.columns  # no holdings: no columns
+        messages = set()
+        for text in ("hold DOGE-USD 5", "unhold BTC-USD"):  # DOGE is not on the watchlist, BTC not held
+            await type_command(pilot, text)
+            messages |= {n.message for n in app._notifications}
+        assert {"DOGE-USD is not on the watchlist: add it first", "no holding in BTC-USD"} <= messages
+        await type_command(pilot, "hold BTC-USD 0.5 @ 60000")
+        await type_command(pilot, "hold ETH-USD 2")
+        assert [c.key.value for c in table.ordered_columns] == ["sym", "last", "chg", "qty", "value", "pnl", "spark"]
+        assert table.get_cell("BTC-USD", "qty").plain == "0.5"
+        assert table.get_cell("BTC-USD", "value").plain == "—"  # no price yet
+        status = app.query_one("#status").render()
+        assert "USD 0.00 + 2 unpriced" in str(status)
+        feed = FakeFeed.instances[-1]
+        feed.on_tick(Tick("BTC-USD", 62000.0, 61000.0))
+        feed.on_tick(Tick("ETH-USD", 2500.0, 2400.0))
+        assert table.get_cell("BTC-USD", "value").plain == "31,000.00"
+        pnl = table.get_cell("BTC-USD", "pnl")
+        assert pnl.plain == "+1,000.00 +3.33%" and GREEN in str(pnl.style)
+        assert table.get_cell("ETH-USD", "pnl").plain == "—"  # no cost given
+        assert table.get_cell("XRP-USD", "qty").plain == "—"
+        app.refresh_status()
+        assert "USD 36,000.00 · 1 without cost" in str(app.query_one("#status").render())
+        await type_command(pilot, "unhold ETH-USD")
+        app.refresh_status()
+        assert "USD 31,000.00 +1,000.00 +3.33%" in str(app.query_one("#status").render())
+        await pilot.press("p")  # hide the columns; the total stays
+        assert "qty" not in table.columns and table.ordered_columns[-1].key.value == "spark"
+        assert "USD 31,000.00" in str(app.query_one("#status").render())
+        await pilot.press("p")
+        assert table.get_cell("BTC-USD", "value").plain == "31,000.00"
+        await type_command(pilot, "add DOGE-USD")  # rows added later get the holding columns too
+        assert table.get_cell("DOGE-USD", "qty").plain == "—"
+
+    app = TerminalApp()  # restart: holdings come back from disk, columns shown
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        assert app.holdings == {"BTC-USD": app_module.Holding("BTC-USD", Decimal("0.5"), Decimal(60000))}
+        assert app.query_one(PriceTable).get_cell("BTC-USD", "qty").plain == "0.5"

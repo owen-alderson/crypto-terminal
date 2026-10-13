@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, indicators, price alerts, and search across every Coinbase pair.
+A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, indicators, price alerts, portfolio P&L, and search across every Coinbase pair.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, price grouping, indicators, coin search, a price alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -26,6 +26,7 @@ Or `pip install crypto-terminal` into any virtualenv.
 - **Indicators**: SMA 20, EMA 50 and VWAP (resets at the UTC day) over the candles, RSI 14 in its own panel.
 - **Coin search**: `add solana` lists every online Solana pair (USD, USDC, USDT, EUR, GBP and BTC quotes first). Exact pairs like `add SOL-BTC` add directly. Sub-cent and BTC-quoted prices keep 5 significant figures.
 - **Price alerts**: on a level (`>` / `<`) or a percentage move. A firing alert rings the terminal bell, shows a toast, and sends a desktop notification (macOS, or Linux with `notify-send`). Pairs with an alert carry a 🔔.
+- **Portfolio P&L**: `hold BTC-USD 0.5 @ 62000` records what you hold and your average cost. The watchlist gains QTY, VALUE and P&L columns (`p` hides or shows them), valued live on every tick. Amounts are kept exactly as typed (decimal, not floating point), so 0.1 BTC stays 0.1 and value and P&L round the same way. The status line shows the total per quote currency (`USD 31,000.00 +1,000.00 +3.33%`); USD, EUR and BTC totals are never converted or added together. The total P&L only appears once every holding has a price and a cost, so a partial figure never passes for the whole: until then it reads `+ 1 unpriced` or `· 1 without cost`.
 - **Status line**: connection state, time since the last tick, UTC clock. Shows `STALE` after 10s without data and reconnects automatically with exponential backoff.
 
 Default pairs: BTC-USD, ETH-USD, XRP-USD, SOL-USD, ADA-USD.
@@ -54,6 +55,7 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `f` | Cycle the view: split → chart only → watchlist only (the watchlist is only as wide as its columns; alone, its sparkline stretches to fill the width) |
 | `b` | Hide / show the order book and trade tape (in watchlist-only view, adds it beside the watchlist) |
 | `g` | Group book prices more coarsely (wraps back to ungrouped) |
+| `p` | Hide / show the portfolio columns (QTY, VALUE, P&L) |
 | `/` or `:` | Open command bar (`esc` closes it) |
 | `ctrl+q` | Quit |
 
@@ -70,9 +72,11 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `alert BTC-USD move 5%` | Alert on a ±5% move from the current price |
 | `alerts` | List alerts with their numbers |
 | `unalert 2` | Remove alert 2 |
+| `hold BTC-USD 0.5 @ 62000` | Hold 0.5 BTC at an average cost of 62,000 (cost is optional; repeating `hold` replaces it) |
+| `unhold BTC-USD` | Remove the holding |
 | `quit` | Exit |
 
-Alerts fire once and are then removed. The watchlist, indicators and alerts are saved in `~/.config/crypto-terminal/` (or `$XDG_CONFIG_HOME/crypto-terminal/`).
+Alerts fire once and are then removed. Alerts and holdings need the pair on the watchlist (that's where prices come from). The watchlist, indicators, alerts and holdings are saved in `~/.config/crypto-terminal/` (or `$XDG_CONFIG_HOME/crypto-terminal/`).
 
 ## From source
 
@@ -94,6 +98,7 @@ crypto_terminal/
   history.py     REST: candles, the product list for search, the live-candle update
   indicators.py  SMA, EMA, RSI, VWAP as pure functions
   alerts.py      alert rules, trigger check, desktop notification
+  portfolio.py   holdings in exact decimals, value and P&L, totals per quote currency
   chart.py       the chart as a pure function: candles in, text lines out; wick tips exact to half a row, solid whole-row bodies
   theme.py       the colour palette
   widgets.py     PriceTable (watchlist), ChartPane (draws chart.py's lines), PairPicker (search results)
