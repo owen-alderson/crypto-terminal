@@ -15,6 +15,7 @@ from .feed import STALE_AFTER, Tick
 from .history import Candle, Product, apply_tick
 from .indicators import ema, sma, vwap
 from .theme import AMBER, AXIS, GREEN, RED, VOL_GREEN, VOL_RED
+from .venues import VENUES, VenueFeed, mid, rate_symbol, vs_coinbase
 
 SPARK = "▁▂▃▄▅▆▇█"
 SPARK_LEN = 20  # ticks shown beside the chart; the watchlist-only view stretches the sparkline to fill the width
@@ -319,3 +320,59 @@ class DepthPane(Widget):
             if trade.missed:  # newest first, so the missed (older) trades sit below
                 lines.append(Text(f"{f' {trade.missed} missed ':·^{width}}", style=AXIS))
         return lines
+
+
+class VenuesPane(Widget):
+    """The selected pair on other exchanges against Coinbase (venues.py), above the order book."""
+
+    DEFAULT_CSS = "VenuesPane { width: 35; border-left: solid #ffb000; }"
+    NAME_W, BP_W = 8, 6  # Coinbase, Binance₮: the price columns' right alignment leaves the gaps
+
+    def on_mount(self):
+        self.symbol: str | None = None
+        self.feeds: list[VenueFeed] = []
+        self.coinbase: dict[str, Tick] = {}  # latest tick per pair from the pane's own Coinbase connection
+        self.coinbase_status = "connecting"
+        self.styles.height = len(VENUES) + 5  # title, column names, Coinbase, the venues, two footnotes
+        self.set_interval(REDRAW_EVERY, self.refresh)
+
+    def render(self):
+        lines = [Text(f"{self.symbol or '—'} on other exchanges", style=f"bold {AMBER}")]
+        if not self.symbol:
+            return Text("\n").join(lines)
+        width, quote = self.size.width, self.symbol.partition("-")[2]
+        price_w = max(0, (width - self.NAME_W - self.BP_W) // 2)  # 0 on the first render, before layout
+        lines.append(Text(f"{'':{self.NAME_W}}{'bid':>{price_w}}{'ask':>{price_w}}{'vs CB':>{self.BP_W}}", style=AXIS))
+        tick = self.coinbase.get(self.symbol)
+        rate_pair = rate_symbol(self.symbol)
+        rate_tick = self.coinbase.get(rate_pair) if rate_pair else None
+        rate = mid(rate_tick.bid, rate_tick.ask) if rate_tick else None
+        coinbase_mid = mid(tick.bid, tick.ask) if tick else None
+
+        def row(name, bid, ask, bp=None):
+            text = f"{name:<{self.NAME_W}}{fmt_price(bid):>{price_w}}{fmt_price(ask):>{price_w}}"
+            if bp is None:
+                return Text(text)
+            # at most 5 characters (+1.43, +11.9, +150): 0.01 bp is ~8 cents on BTC, finer than venues differ by
+            places = 2 if abs(bp) < 10 else 1 if abs(bp) < 100 else 0
+            return Text(text) + Text(f"{bp:+.{places}f}".rjust(self.BP_W), style=AXIS)
+
+        if coinbase_mid is None:
+            status = self.coinbase_status if self.coinbase_status != "live" else "waiting for a quote"
+            lines.append(Text(f"{'Coinbase':<{self.NAME_W}}{status}"[:width]))
+        else:
+            lines.append(row("Coinbase", tick.bid, tick.ask))
+        stable = False
+        for feed in self.feeds:
+            name = feed.NAME + ("₮" if feed.quote != quote else "")
+            stable |= feed.quote != quote
+            if feed.bid and feed.ask:
+                lines.append(row(name, feed.bid, feed.ask, vs_coinbase(feed, coinbase_mid, rate, quote)))
+            else:  # status carries server text: Text, never markup
+                status = "no quote yet" if feed.status == "live" else feed.status
+                lines.append(Text(f"{name:<{self.NAME_W}}{status}"[:width], style=AXIS))
+        if stable:
+            note = f"₮ USDT at {rate:.5f} {quote} (Coinbase)" if rate else "₮ USDT: waiting for Coinbase rate"
+            lines.append(Text(note[:width], style=AXIS))
+        lines.append(Text("vs CB: mid vs Coinbase mid, bp"[:width], style=AXIS))
+        return Text("\n").join(lines)

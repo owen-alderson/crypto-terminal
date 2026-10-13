@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders and volume spikes that can run in the background and push to your phone.
+A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders and volume spikes that can run in the background and push to your phone.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, price grouping, indicators, coin search, a price alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -23,6 +23,7 @@ Or `pip install crypto-terminal` into any virtualenv.
 - **Candlestick chart** for the highlighted pair, with volume underneath. Six timeframes (1m to 1d candles) in a strip above the chart, three zoom levels, and `f` to switch between split, chart-only and watchlist-only views. The last candle follows the live price and a new one opens at each candle boundary. Wick tips (highs and lows) are drawn to half a character row and bodies are solid whole rows, so candles never break in any terminal; the highest high and lowest low fill the panel exactly, and each axis label is the exact price of its grid line. Missing candles leave a gap rather than squashing time. A dashed line and tag mark the last price.
 - **Order book** for the highlighted pair: the best bids and asks with size and a depth bar (cumulative size from the best price out), and the real spread in price and basis points. Prices are grouped so walls are visible: each pair opens at the step nearest 1 basis point of its price ($10 for BTC at ~$82k), and `g` cycles coarser up to 0.5% of the price, then back to ungrouped. Grouped asks round up and bids round down, so a level never shows a better price than is really on offer. A size too small for the column reads `<0.0001`, never `0`. If the connection drops or goes quiet, the book is hidden (not shown stale) until a fresh snapshot arrives.
 - **Trade tape**: every trade as it prints, green when the buyer crossed the spread, red when the seller did. A bar on top shows the share of the last minute's volume that was bought. Trades in the same second, side and price are combined into one line with a count (`×3`); lines bigger than 98% of recent ones are highlighted. Trade ids are sequential, so a trade that never arrived shows as `1 missed` instead of silently vanishing. `b` hides or shows the book and tape; on terminals narrower than 140 columns they start hidden.
+- **Other exchanges** (`x`): the highlighted pair's best bid and ask on Kraken, Binance, Bybit and OKX next to Coinbase, and how far each one's mid price sits from Coinbase's, in basis points. This is the view no exchange's own screen gives you: where the pair is cheaper or dearer right now, and whether Coinbase buyers are paying a premium. Binance, Bybit and OKX price USD pairs in USDT (marked ₮), a stablecoin that drifts a little above or below $1. Their prices are converted to USD at Coinbase's live USDT-USD price before comparing, and the rate is shown; compared directly, a 0.1% USDT drift would show as a 10 bp premium that isn't there. Until the rate arrives, those rows show prices but no comparison. A pair an exchange doesn't list says `not listed`. A dropped connection shows its status, never its last prices. Connections open only while the panel is showing, for the highlighted pair only.
 - **Indicators**: SMA 20, EMA 50 and VWAP (resets at the UTC day) over the candles, RSI 14 in its own panel.
 - **Coin search**: `add solana` lists every online Solana pair (USD, USDC, USDT, EUR, GBP and BTC quotes first). Exact pairs like `add SOL-BTC` add directly. Sub-cent and BTC-quoted prices keep 5 significant figures.
 - **Alerts**: on a price level or a percentage move (these fire once), or watch alerts that stay armed:
@@ -60,6 +61,7 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `f` | Cycle the view: split → chart only → watchlist only (the watchlist is only as wide as its columns; alone, its sparkline stretches to fill the width) |
 | `b` | Hide / show the order book and trade tape (in watchlist-only view, adds it beside the watchlist) |
 | `g` | Group book prices more coarsely (wraps back to ungrouped) |
+| `x` | Show / hide the pair on other exchanges (above the book) |
 | `/` or `:` | Open command bar (`esc` closes it) |
 | `ctrl+q` | Quit |
 
@@ -118,6 +120,7 @@ crypto_terminal/
   indicators.py  SMA, EMA, RSI, VWAP as pure functions
   alerts.py      alert rules, the watcher (windows, cooldowns, warm-up), desktop + ntfy notifications
   watch.py       `crypto-terminal watch`: alerts with no screen
+  venues.py      Kraken, Binance, Bybit, OKX best bid/ask feeds; USDT → USD conversion
   chart.py       the chart as a pure function: candles in, text lines out; wick tips exact to half a row, solid whole-row bodies
   theme.py       the colour palette
   widgets.py     PriceTable (watchlist), ChartPane (draws chart.py's lines), PairPicker (search results)
