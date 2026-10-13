@@ -35,6 +35,18 @@ def test_parse_tick_rejects_malformed(override):
     assert parse_tick({**TICKER, **override}) is None
 
 
+@pytest.mark.parametrize("bid,ask,expected", [
+    ("85359.12", "85359.13", (85359.12, 85359.13)),
+    ("85359.14", "85359.13", (None, None)),  # crossed: no spread rather than a negative one
+    ("0", "85359.13", (None, None)),
+    ("abc", "1", (None, None)),
+    (None, None, (None, None)),
+])
+def test_parse_tick_best_bid_ask(bid, ask, expected):
+    tick = parse_tick({**TICKER, "best_bid": bid, "best_ask": ask})
+    assert tick.price == 85359.13 and (tick.bid, tick.ask) == expected
+
+
 def test_parse_tick_rejects_missing_field():
     assert parse_tick({k: v for k, v in TICKER.items() if k != "price"}) is None
 
@@ -48,6 +60,9 @@ def test_parse_tick_rejects_missing_field():
     ("add Solana", ("find", "SOLANA")),
     ("ind SMA20 rsi", ("ind", ["sma20", "rsi"])),
     ("ind off", ("ind", [])),
+    ("push my-topic", ("push", "https://ntfy.sh/my-topic")),
+    ("push off", ("push", "")),
+    ("push", ("push", None)),
 ])
 def test_parse_command_valid(text, expected):
     assert parse_command(text) == expected
@@ -55,7 +70,7 @@ def test_parse_command_valid(text, expected):
 
 @pytest.mark.parametrize("text", [
     "", "   ", "add", "add SOL-USD ETH-USD", "rm SOL", "add sol!", "add ../../etc", "add SOL-USD?x=1",
-    "rm", "buy BTC-USD", "quit now", "ind", "ind macd", "ind off rsi",
+    "rm", "buy BTC-USD", "quit now", "ind", "ind macd", "ind off rsi", "push a b", "push http://x/y",
 ])
 def test_parse_command_invalid(text):
     with pytest.raises(ValueError):

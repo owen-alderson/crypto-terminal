@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, indicators, price alerts, and search across every Coinbase pair.
+A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders and volume spikes that can run in the background and push to your phone.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, price grouping, indicators, coin search, a price alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -25,7 +25,13 @@ Or `pip install crypto-terminal` into any virtualenv.
 - **Trade tape**: every trade as it prints, green when the buyer crossed the spread, red when the seller did. A bar on top shows the share of the last minute's volume that was bought. Trades in the same second, side and price are combined into one line with a count (`×3`); lines bigger than 98% of recent ones are highlighted. Trade ids are sequential, so a trade that never arrived shows as `1 missed` instead of silently vanishing. `b` hides or shows the book and tape; on terminals narrower than 140 columns they start hidden.
 - **Indicators**: SMA 20, EMA 50 and VWAP (resets at the UTC day) over the candles, RSI 14 in its own panel.
 - **Coin search**: `add solana` lists every online Solana pair (USD, USDC, USDT, EUR, GBP and BTC quotes first). Exact pairs like `add SOL-BTC` add directly. Sub-cent and BTC-quoted prices keep 5 significant figures.
-- **Price alerts**: on a level (`>` / `<`) or a percentage move. A firing alert rings the terminal bell, shows a toast, and sends a desktop notification (macOS, or Linux with `notify-send`). Pairs with an alert carry a 🔔.
+- **Alerts**: on a price level or a percentage move (these fire once), or watch alerts that stay armed:
+  - **fast move**: `move 2% 15m` fires when the price is 2% above the lowest or below the highest of the last 15 minutes.
+  - **wide spread**: `spread 5bp` fires when the gap between the best bid and ask passes 5 basis points of the price (liquidity drying up).
+  - **big order**: `print 500k` fires when one taker order is worth 500,000 or more in the quote currency. Its fills are added up, so a sweep through many price levels counts as the one order it was, and fires once.
+  - **volume spike**: `volume 3x` fires when the last minute traded 3x the average minute of the 15 before. It needs 16 minutes of unbroken trades first; if a trade is missed (trade ids are sequential), it starts counting again rather than compare against a baseline that's too low.
+
+  Watch alerts fire when their condition becomes true (not on every tick while it stays true), at most once a minute each; anything held back is counted in the next message. An alert rings the terminal bell, shows a toast, sends a desktop notification (macOS, or Linux with `notify-send`) and, if set up, a push to your phone. Pairs with an alert carry a 🔔.
 - **Status line**: connection state, time since the last tick, UTC clock. Shows `STALE` after 10s without data and reconnects automatically with exponential backoff.
 
 Default pairs: BTC-USD, ETH-USD, XRP-USD, SOL-USD, ADA-USD.
@@ -68,11 +74,28 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `ind off` | Clear all indicators |
 | `alert BTC-USD > 90000` | Alert when the price reaches 90,000 or more (`<` for at or below) |
 | `alert BTC-USD move 5%` | Alert on a ±5% move from the current price |
+| `alert BTC-USD move 2% 15m` | Watch for a 2% move within any 15 minutes (`1m` to `4h`) |
+| `alert BTC-USD spread 5bp` | Watch for the spread passing 5 basis points |
+| `alert BTC-USD print 500k` | Watch for one order worth 500,000 USD or more (`k`, `m` suffixes) |
+| `alert BTC-USD volume 3x` | Watch for a minute with 3x the normal volume |
 | `alerts` | List alerts with their numbers |
 | `unalert 2` | Remove alert 2 |
+| `push mytopic` | Also send alerts to your phone through [ntfy](https://ntfy.sh) (`push off` stops, `push` shows the setting) |
 | `quit` | Exit |
 
-Alerts fire once and are then removed. The watchlist, indicators and alerts are saved in `~/.config/crypto-terminal/` (or `$XDG_CONFIG_HOME/crypto-terminal/`).
+Price and one-shot move alerts fire once and are then removed; watch alerts (marked ↻ in `alerts`) stay until you remove them. The watchlist, indicators, alerts and push setting are saved in `~/.config/crypto-terminal/` (or `$XDG_CONFIG_HOME/crypto-terminal/`).
+
+## Alerts in the background
+
+```bash
+crypto-terminal watch
+```
+
+Checks your alerts with no screen: on a laptop left open, or a small server. It reads the same alerts as the terminal and picks up changes within seconds, so set alerts in the terminal and let `watch` look after them. While it runs, the terminal shows `alerts checked by watch` and leaves the checking to it, so nothing fires twice. It connects only for the pairs that have alerts (and streams trades only for big-order and volume alerts).
+
+Each alert prints one line to stdout, so `crypto-terminal watch >> ~/crypto-alerts.log` keeps a history. Ctrl-C or `kill` stops it cleanly.
+
+**Push to your phone**: install the free [ntfy](https://ntfy.sh) app, subscribe to a topic, then run `push <topic>` in the terminal (it sends a test). Anyone who knows a topic name on ntfy.sh can read it, so pick a long random one (`push crypto-7f3k9q2m`), or run your own server: `push https://ntfy.example.com/alerts`.
 
 ## From source
 
@@ -93,7 +116,8 @@ crypto_terminal/
                  reconnects with exponential backoff (1s → 30s); 30s of silence = dead socket
   history.py     REST: candles, the product list for search, the live-candle update
   indicators.py  SMA, EMA, RSI, VWAP as pure functions
-  alerts.py      alert rules, trigger check, desktop notification
+  alerts.py      alert rules, the watcher (windows, cooldowns, warm-up), desktop + ntfy notifications
+  watch.py       `crypto-terminal watch`: alerts with no screen
   chart.py       the chart as a pure function: candles in, text lines out; wick tips exact to half a row, solid whole-row bodies
   theme.py       the colour palette
   widgets.py     PriceTable (watchlist), ChartPane (draws chart.py's lines), PairPicker (search results)

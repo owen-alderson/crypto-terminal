@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+import os
 import time
 
 import pytest
 
 from crypto_terminal import app as app_module
 from crypto_terminal.app import TerminalApp
-from crypto_terminal.book import BookFeed
+from crypto_terminal.book import BookFeed, Trade
 from crypto_terminal.feed import Tick
 from crypto_terminal.history import Candle, Product
 from crypto_terminal.theme import GREEN, RED
@@ -25,8 +26,9 @@ DESKTOP = []  # desktop notifications sent
 class FakeFeed:
     instances = []
 
-    def __init__(self, symbols, on_tick, on_status):
+    def __init__(self, symbols, on_tick, on_status, trade_symbols=(), on_trade=None):
         self.symbols, self.on_tick, self.on_status, self.last_msg = symbols, on_tick, on_status, 0.0
+        self.trade_symbols, self.on_trade = list(trade_symbols), on_trade
         FakeFeed.instances.append(self)
 
     async def run(self):
@@ -57,6 +59,7 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "WATCHLIST_FILE", path)
     monkeypatch.setattr(app_module, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(app_module, "ALERTS_FILE", tmp_path / "alerts.json")
+    monkeypatch.setattr(app_module, "WATCH_PID_FILE", tmp_path / "watch.pid")
     monkeypatch.setattr(app_module, "desktop_notify", lambda title, message: DESKTOP.append(message))
     DESKTOP.clear()
     monkeypatch.setattr(app_module, "Feed", FakeFeed)
@@ -497,3 +500,63 @@ async def test_count_column_grows_so_counts_are_never_cut(offline):
                          "product_id": "BTC-USD", "time": "2026-10-09T23:13:41.322560Z"})
         line = next(line for line in pane.render().split("\n") if "×" in line.plain)
         assert line.plain.endswith("×295") and line.cell_len == pane.size.width
+
+
+async def test_spread_and_print_alerts_fire_repeatedly_and_trades_stream_only_when_needed(offline, monkeypatch):
+    pushed = []
+
+    async def fake_push(client, url, message):
+        pushed.append((url, message))
+
+    monkeypatch.setattr(app_module, "push", fake_push)
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        assert FakeFeed.instances[-1].trade_symbols == []
+        await type_command(pilot, "push my-topic")
+        await pilot.pause()
+        assert pushed == [("https://ntfy.sh/my-topic", "crypto-terminal: push works")]
+        await type_command(pilot, "alert BTC-USD spread 5bp")
+        await type_command(pilot, "alert ETH-USD print 1000")
+        feed = FakeFeed.instances[-1]
+        assert feed.trade_symbols == ["ETH-USD"]  # feed restarted with trades for the print alert only
+
+        feed.on_tick(Tick("BTC-USD", 100.0, 90.0, 99.9, 100.1))
+        feed.on_trade("ETH-USD", Trade(1, "12:00:00", 2000.0, 0.6, True, 2, taker="x"))
+        await pilot.pause()
+        assert DESKTOP == ["BTC-USD spread 20 bp (bid 99.900 · ask 100.10)",
+                           "ETH-USD buy order ≥ 1,000.00 USD (1,200.00 so far, at 2,000.00)"]
+        assert [m for _, m in pushed[1:]] == DESKTOP
+        assert len(app.alerts) == 2  # watch alerts stay armed
+        await type_command(pilot, "alerts")
+        assert ("1. BTC-USD spread > 5 bp ↻\n2. ETH-USD order ≥ 1,000.00 USD ↻"
+                in [n.message for n in app._notifications])
+        await type_command(pilot, "unalert 2")
+        assert FakeFeed.instances[-1].trade_symbols == []
+    config = json.loads((offline.parent / "config.json").read_text())
+    assert config == {"push": "https://ntfy.sh/my-topic"}
+
+
+async def test_alert_changes_from_another_process_are_picked_up_and_a_running_watch_takes_over(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await type_command(pilot, "ind rsi")  # config.json keeps both settings
+        await type_command(pilot, "push t1")
+        assert json.loads((offline.parent / "config.json").read_text()) == {
+            "indicators": ["rsi"], "push": "https://ntfy.sh/t1"}
+        app_module.save_alerts([app_module.Alert("BTC-USD", ">", 100)])  # e.g. a second terminal
+        await pilot.pause(1.2)
+        assert app.alerts == [app_module.Alert("BTC-USD", ">", 100)]
+        assert app.query_one(PriceTable).get_cell("BTC-USD", "sym").plain == "BTC-USD 🔔"
+
+        (offline.parent / "watch.pid").write_text(str(os.getpid()))  # `crypto-terminal watch` is running
+        await pilot.pause(1.2)
+        assert f"alerts checked by watch (pid {os.getpid()})" in str(app.query_one("#status").render())
+        FakeFeed.instances[-1].on_tick(Tick("BTC-USD", 101.0, 90.0))
+        assert DESKTOP == [] and len(app.alerts) == 1  # watch fires it, not the terminal too
+
+        (offline.parent / "watch.pid").write_text("999999999")  # watch crashed: a stale pid file doesn't count
+        await pilot.pause(1.2)
+        FakeFeed.instances[-1].on_tick(Tick("BTC-USD", 101.0, 90.0))
+        assert DESKTOP == ["BTC-USD > 100.00 · now 101.00"] and app.alerts == []

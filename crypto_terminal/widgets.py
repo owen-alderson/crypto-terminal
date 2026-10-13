@@ -33,6 +33,11 @@ OVERLAYS = {
 INDICATORS = (*OVERLAYS, "rsi")
 
 
+def fmt_bp(bps: float) -> str:
+    """BTC's one-cent spread is ~0.0012 bp: 2 significant figures, so it never reads as 0."""
+    return f"{bps:.2g}" if bps < 100 else f"{bps:.0f}"
+
+
 def sparkline(values) -> str:
     lo, hi = min(values), max(values)
     if hi == lo:
@@ -272,8 +277,8 @@ class DepthPane(Widget):
         bid, ask = book.best()
         if bid and ask:  # the real spread, whatever the grouping
             spread = ask - bid
-            bps = spread / ((ask + bid) / 2) * 1e4  # BTC's one-cent spread is ~0.0012 bp: 2 significant figures
-            gap = f" spread {spread:,.{book.dp}f} · {f'{bps:.2g}' if bps < 100 else f'{bps:.0f}'} bp "
+            bps = spread / ((ask + bid) / 2) * 1e4
+            gap = f" spread {spread:,.{book.dp}f} · {fmt_bp(bps)} bp "
         else:
             gap = " one-sided book "
         lines.append(Text(f"{gap:─^{width}}", style=AXIS))
