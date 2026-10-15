@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders and volume spikes that can run in the background and push to your phone.
+A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, price grouping, indicators, coin search, a price alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -24,6 +24,13 @@ Or `pip install crypto-terminal` into any virtualenv.
 - **Order book** for the highlighted pair: the best bids and asks with size and a depth bar (cumulative size from the best price out), and the real spread in price and basis points. Prices are grouped so walls are visible: each pair opens at the step nearest 1 basis point of its price ($10 for BTC at ~$82k), and `g` cycles coarser up to 0.5% of the price, then back to ungrouped. Grouped asks round up and bids round down, so a level never shows a better price than is really on offer. A size too small for the column reads `<0.0001`, never `0`. If the connection drops or goes quiet, the book is hidden (not shown stale) until a fresh snapshot arrives.
 - **Trade tape**: every trade as it prints, green when the buyer crossed the spread, red when the seller did. A bar on top shows the share of the last minute's volume that was bought. Trades in the same second, side and price are combined into one line with a count (`×3`); lines bigger than 98% of recent ones are highlighted. Trade ids are sequential, so a trade that never arrived shows as `1 missed` instead of silently vanishing. `b` hides or shows the book and tape; on terminals narrower than 140 columns they start hidden.
 - **Other exchanges** (`x`): the highlighted pair's best bid and ask on Kraken, Binance, Bybit and OKX next to Coinbase, and how far each one's mid price sits from Coinbase's, in basis points. This is the view no exchange's own screen gives you: where the pair is cheaper or dearer right now, and whether Coinbase buyers are paying a premium. Binance, Bybit and OKX price USD pairs in USDT (marked ₮), a stablecoin that drifts a little above or below $1. Their prices are converted to USD at Coinbase's live USDT-USD price before comparing, and the rate is shown; compared directly, a 0.1% USDT drift would show as a 10 bp premium that isn't there. Until the rate arrives, those rows show prices but no comparison. A pair an exchange doesn't list says `not listed`. A dropped connection shows its status, never its last prices. Connections open only while the panel is showing, for the highlighted pair only.
+- **Perps** (`d`): what the futures market is doing to the highlighted pair, from Binance and Bybit's public USDT perpetual futures feeds. A perpetual future ("perp") is a futures contract with no expiry, and it is where most crypto leverage sits, so it often explains a spot move that a spot screen can't.
+  - **funding**: every few hours, longs pay shorts (positive rate) or shorts pay longs (negative) to keep the perp's price near spot. `+0.0100%` every 8h is the usual resting level; a rate well above that means a crowded long. The rate is the one that will be charged at the next funding time, as it stands now, and the panel shows that time and the interval (8h for most pairs, 4h or 1h for some), because a 4h rate is not comparable with an 8h one.
+  - **premium bp**: the perp's mark price against the exchange's own spot index, in basis points. The perp is a separate market, so its price is never shown as if it were spot.
+  - **OI** and **OI Δ15m**: open interest, the contracts open in the base coin (each long/short pair counted once), and its change over the last 15 minutes. Rising with the price means new money coming in; falling means positions closing. Since June 2026 Bybit's `openInterest` field counts both sides, twice Binance's basis; the panel uses its `singleOpenInterest` so the two columns compare. The change needs 15 minutes of samples (taken once a minute) before it shows.
+  - **liquidations**: positions the exchange closed by force, newest first, in USDT, from when the panel opened (they're not backfilled). A closed long is a forced sell (red), a closed short a forced buy (green). Binance sends at most one per pair per second, so its tape is a lower bound; Bybit gives the position's bankruptcy price rather than the fill price, so its amounts are close but not exact.
+
+  `BTC-USD` maps to the `BTCUSDT` perp; pairs quoted in EUR or BTC say `no USDT perp`, and a coin with no perp says `not listed` (some small coins trade only as 1000-coin contracts, such as Binance's `1000SHIBUSDT`, which aren't matched). Like the other panels, a dropped connection shows its status, never its last numbers.
 - **Indicators**: SMA 20, EMA 50 and VWAP (resets at the UTC day) over the candles, RSI 14 in its own panel.
 - **Coin search**: `add solana` lists every online Solana pair (USD, USDC, USDT, EUR, GBP and BTC quotes first). Exact pairs like `add SOL-BTC` add directly. Sub-cent and BTC-quoted prices keep 5 significant figures.
 - **Alerts**: on a price level or a percentage move (these fire once), or watch alerts that stay armed:
@@ -31,6 +38,8 @@ Or `pip install crypto-terminal` into any virtualenv.
   - **wide spread**: `spread 5bp` fires when the gap between the best bid and ask passes 5 basis points of the price (liquidity drying up).
   - **big order**: `print 500k` fires when one taker order is worth 500,000 or more in the quote currency. Its fills are added up, so a sweep through many price levels counts as the one order it was, and fires once.
   - **volume spike**: `volume 3x` fires when the last minute traded 3x the average minute of the 15 before. It needs 16 minutes of unbroken trades first; if a trade is missed (trade ids are sequential), it starts counting again rather than compare against a baseline that's too low.
+  - **funding**: `funding 0.05%` fires when the perp funding rate on Binance or Bybit reaches +0.05% or −0.05%, and says which exchange.
+  - **liquidation**: `liq 1m` fires when one liquidation on Binance or Bybit is worth 1,000,000 USDT or more. Each is checked on its own, never added up.
 
   Watch alerts fire when their condition becomes true (not on every tick while it stays true), at most once a minute each; anything held back is counted in the next message. An alert rings the terminal bell, shows a toast, sends a desktop notification (macOS, or Linux with `notify-send`) and, if set up, a push to your phone. Pairs with an alert carry a 🔔.
 - **Status line**: connection state, time since the last tick, UTC clock. Shows `STALE` after 10s without data and reconnects automatically with exponential backoff.
@@ -62,6 +71,7 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `b` | Hide / show the order book and trade tape (in watchlist-only view, adds it beside the watchlist) |
 | `g` | Group book prices more coarsely (wraps back to ungrouped) |
 | `x` | Show / hide the pair on other exchanges (above the book) |
+| `d` | Show / hide perps: funding, premium, open interest, liquidations (above the book) |
 | `/` or `:` | Open command bar (`esc` closes it) |
 | `ctrl+q` | Quit |
 
@@ -80,6 +90,8 @@ Coinbase pushes an update on every trade (bursts are batched); nothing is polled
 | `alert BTC-USD spread 5bp` | Watch for the spread passing 5 basis points |
 | `alert BTC-USD print 500k` | Watch for one order worth 500,000 USD or more (`k`, `m` suffixes) |
 | `alert BTC-USD volume 3x` | Watch for a minute with 3x the normal volume |
+| `alert BTC-USD funding 0.05%` | Watch for perp funding at ±0.05% or beyond on Binance or Bybit |
+| `alert BTC-USD liq 1m` | Watch for one liquidation worth 1,000,000 USDT or more (`k`, `m` suffixes) |
 | `alerts` | List alerts with their numbers |
 | `unalert 2` | Remove alert 2 |
 | `push mytopic` | Also send alerts to your phone through [ntfy](https://ntfy.sh) (`push off` stops, `push` shows the setting) |
@@ -93,7 +105,7 @@ Price and one-shot move alerts fire once and are then removed; watch alerts (mar
 crypto-terminal watch
 ```
 
-Checks your alerts with no screen: on a laptop left open, or a small server. It reads the same alerts as the terminal and picks up changes within seconds, so set alerts in the terminal and let `watch` look after them. While it runs, the terminal shows `alerts checked by watch` and leaves the checking to it, so nothing fires twice. It connects only for the pairs that have alerts (and streams trades only for big-order and volume alerts).
+Checks your alerts with no screen: on a laptop left open, or a small server. It reads the same alerts as the terminal and picks up changes within seconds, so set alerts in the terminal and let `watch` look after them. While it runs, the terminal shows `alerts checked by watch` and leaves the checking to it, so nothing fires twice. It connects only for the pairs that have alerts (and streams trades only for big-order and volume alerts, and perps only for funding and liquidation alerts).
 
 Each alert prints one line to stdout, so `crypto-terminal watch >> ~/crypto-alerts.log` keeps a history. Ctrl-C or `kill` stops it cleanly.
 
@@ -121,6 +133,7 @@ crypto_terminal/
   alerts.py      alert rules, the watcher (windows, cooldowns, warm-up), desktop + ntfy notifications
   watch.py       `crypto-terminal watch`: alerts with no screen
   venues.py      Kraken, Binance, Bybit, OKX best bid/ask feeds; USDT → USD conversion
+  derivs.py      Binance + Bybit perp feeds: funding, premium, open interest, liquidations
   chart.py       the chart as a pure function: candles in, text lines out; wick tips exact to half a row, solid whole-row bodies
   theme.py       the colour palette
   widgets.py     PriceTable (watchlist), ChartPane (draws chart.py's lines), PairPicker (search results)

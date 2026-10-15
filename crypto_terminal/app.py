@@ -16,11 +16,12 @@ from textual.widgets import Input, Static
 
 from .alerts import Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
 from .book import BookFeed
+from .derivs import PERPS
 from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
 from .theme import AMBER
 from .venues import VENUES, rate_symbol
-from .widgets import INDICATORS, ChartPane, DepthPane, PairPicker, PriceTable, VenuesPane
+from .widgets import INDICATORS, ChartPane, DepthPane, DerivsPane, PairPicker, PriceTable, VenuesPane
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "crypto-terminal"
 WATCHLIST_FILE = CONFIG_DIR / "watchlist.json"
@@ -207,11 +208,12 @@ class TerminalApp(App):
         ("b", "toggle_book", "Order book + trades"),
         ("g", "group_book", "Group book prices"),
         ("x", "toggle_venues", "Other exchanges"),
+        ("d", "toggle_derivs", "Perps: funding, open interest, liquidations"),
     ]
 
     def compose(self) -> ComposeResult:
-        yield Static("CRYPTO TERMINAL · COINBASE SPOT · [1-6] or [ ] timeframe · [+ -] zoom · [f] view · "
-                     "[b] book [g] group · [x] exchanges · [/] command", id="title", markup=False)
+        yield Static("CRYPTO TERMINAL · COINBASE SPOT · [1-6] [ ] timeframe · [+ -] zoom · [f] view · "
+                     "[b] book [g] group · [x] exchanges [d] perps · [/] command", id="title", markup=False)
         with Horizontal(id="main"):
             yield PriceTable(id="watchlist")
             with Vertical(id="chart-col"):
@@ -219,9 +221,11 @@ class TerminalApp(App):
                 yield ChartPane(id="chart")
             with Vertical(id="side"):
                 yield VenuesPane(id="venues")
+                yield DerivsPane(id="derivs")
                 yield DepthPane(id="depth")
         yield Input(placeholder="add SOL-USD · add solana · rm ADA-USD · ind sma20 ema50 vwap rsi · ind off · "
-                                "alert BTC-USD > 90000 · alert BTC-USD print 500k · alerts · unalert 1 · push mytopic · "
+                                "alert BTC-USD > 90000 · alert BTC-USD print 500k · alert BTC-USD liq 1m · alerts · "
+                                "unalert 1 · push mytopic · "
                                 "quit   (esc closes)", id="cmd")
         yield Static(id="status", markup=False)  # status carries server text: never parse it as markup
 
@@ -237,8 +241,9 @@ class TerminalApp(App):
         self.view = "split"
         self.show_book = self.size.width >= BOOK_MIN_WIDTH  # split and chart views
         self.book_beside_watchlist = False  # watchlist view: `b` adds the book beside it
-        self.show_venues = False
-        self.query_one(VenuesPane).display = False
+        self.show_venues = self.show_derivs = False
+        self.query_one(VenuesPane).display = self.query_one(DerivsPane).display = False
+        self.perp_alert_symbols: list[str] = []
         table = self.query_one(PriceTable)
         table.set_symbols(self.symbols)
         table.focus()
@@ -250,6 +255,7 @@ class TerminalApp(App):
         table.set_alerts({a.symbol for a in self.alerts})
         self.refresh_bar()
         self.restart_feed()
+        self.sync_perp_alerts()
         self.load_products()
         self.set_interval(1, self.refresh_status)
         self.refresh_status()
@@ -299,6 +305,31 @@ class TerminalApp(App):
     def handle_trade(self, symbol: str, trade):
         if not self.watch:
             self.deliver(self.watcher.on_trade(symbol, trade))
+
+    def sync_perp_alerts(self):
+        """Perp feeds for the watchlist pairs with funding or liq alerts (the pane opens its own, for one pair)."""
+        symbols = [s for s in self.watcher.perp_symbols if s in self.symbols]
+        if symbols == self.perp_alert_symbols:
+            return  # unchanged: keep the open connections
+        self.perp_alert_symbols = symbols
+        if symbols:
+            self.run_perp_alerts(self.perp_alert_symbols)
+        else:
+            self.workers.cancel_group(self, "perp-alerts")
+
+    @work(exclusive=True, group="perp-alerts")
+    async def run_perp_alerts(self, symbols: list[str]):
+        def feed(perp, symbol):
+            def on_funding(rate):
+                if not self.watch:
+                    self.deliver(self.watcher.on_funding(symbol, perp.NAME, rate))
+
+            def on_liq(liq):
+                if not self.watch:
+                    self.deliver(self.watcher.on_liquidation(symbol, liq))
+            return perp(symbol, on_liq=on_liq, on_funding=on_funding)
+
+        await asyncio.gather(*(feed(perp, symbol).run() for symbol in symbols for perp in PERPS))
 
     def deliver(self, fired: list[Fired]):
         if not fired:
@@ -356,6 +387,7 @@ class TerminalApp(App):
         self.load_chart()
         self.restart_book()
         self.restart_venues()
+        self.restart_derivs()
 
     def action_timeframe(self, key: str):
         self.timeframe = key
@@ -451,6 +483,29 @@ class TerminalApp(App):
                         on_status)
         pane.feeds = [venue(symbol) for venue in VENUES]
         await asyncio.gather(coinbase.run(), *(feed.run() for feed in pane.feeds))
+
+    # ── perpetual futures ──
+
+    def action_toggle_derivs(self):
+        self.show_derivs = not self.show_derivs
+        self.restart_derivs()
+
+    def restart_derivs(self):
+        """Perp feeds for the selected pair, only while the pane is visible."""
+        pane = self.query_one(DerivsPane)
+        pane.display = self.show_derivs
+        pane.symbol, pane.feeds = self.selected, []  # never the previous pair's numbers
+        if pane.display and self.selected in self.symbols:
+            self.run_derivs(self.selected)
+        else:
+            self.workers.cancel_group(self, "derivs")
+
+    @work(exclusive=True, group="derivs")
+    async def run_derivs(self, symbol: str):
+        pane = self.query_one(DerivsPane)
+        await asyncio.sleep(BOOK_DELAY)  # scrolling past a pair opens nothing
+        pane.feeds, pane.since = [perp(symbol) for perp in PERPS], time.time()
+        await asyncio.gather(*(feed.run() for feed in pane.feeds))
 
     def refresh_bar(self):
         bar = Text(f" {self.selected or '—'} │ ")
@@ -596,12 +651,14 @@ class TerminalApp(App):
         self.query_one(PriceTable).set_alerts({a.symbol for a in self.alerts})
         if self.feed and self.feed.trade_symbols != self.trade_symbols():
             self.restart_feed()
+        self.sync_perp_alerts()
 
     def watchlist_changed(self):
         save_watchlist(self.symbols)
         self.query_one(PriceTable).set_symbols(self.symbols)
         self.query_one(PriceTable).set_alerts({a.symbol for a in self.alerts})
         self.restart_feed()
+        self.sync_perp_alerts()
         if not self.symbols:
             self.load_chart()
             self.restart_book()

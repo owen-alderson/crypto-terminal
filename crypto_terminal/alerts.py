@@ -7,6 +7,8 @@ was set. Watch alerts stay armed and fire each time their condition becomes true
     spread 5bp    best ask minus best bid is wider than 5 basis points of the mid price
     print 500k    one taker order (all of its fills together) is worth 500,000 or more in the quote currency
     volume 3x     the last minute traded 3x the average minute of the 15 before it
+    funding 0.05% the perp funding rate on Binance or Bybit reaches +0.05% or -0.05% (derivs.py)
+    liq 1m        one liquidation on Binance or Bybit is worth 1,000,000 USDT or more
 """
 
 import math
@@ -24,12 +26,14 @@ from .feed import Tick
 from .history import SYMBOL_RE
 from .widgets import fmt_bp, fmt_price
 
-KINDS = (">", "<", "move", "spread", "print", "volume")
+KINDS = (">", "<", "move", "spread", "print", "volume", "funding", "liq")
 TRADE_KINDS = ("print", "volume")  # need every trade (the `matches` channel), not just the ticker
+PERP_KINDS = ("funding", "liq")  # need the perp feeds (derivs.py)
 COOLDOWN = 60  # seconds: a watch alert fires at most once a minute
 MAX_WINDOW = 240  # minutes, for `move N% in a window`
 BASELINE = 15  # minutes of volume a `volume` alert compares the last minute against
-USAGE = ("usage: alert BTC-USD > 90000 · < 80000 · move 5% · move 2% 15m · spread 5bp · print 500k · volume 3x")
+USAGE = ("usage: alert BTC-USD > 90000 · < 80000 · move 5% · move 2% 15m · spread 5bp · print 500k · volume 3x · "
+         "funding 0.05% · liq 1m")
 SUFFIXES = {"k": 1e3, "m": 1e6}
 WINDOW_RE = re.compile(r"(\d+)(m|h)")
 NTFY_TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -39,13 +43,14 @@ NTFY_TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 class Alert:
     symbol: str
     kind: str  # one of KINDS
-    level: float  # price for > and <, percent for move, basis points for spread, quote amount for print, multiple for volume
+    level: float  # price for > and <, percent for move and funding, basis points for spread, quote amount for print,
+    # multiple for volume, USDT for liq
     ref: float | None = None  # one-shot move only: the price when the alert was set
     window: int | None = None  # minutes: makes `move` a watch alert over that window
 
     @property
     def repeats(self) -> bool:
-        return self.kind in ("spread", "print", "volume") or self.window is not None
+        return self.kind in ("spread", "print", "volume", *PERP_KINDS) or self.window is not None
 
     def __str__(self):
         if self.kind == "move" and self.window:
@@ -58,6 +63,10 @@ class Alert:
             return f"{self.symbol} order ≥ {fmt_price(self.level)} {self.symbol.partition('-')[2]}"
         if self.kind == "volume":
             return f"{self.symbol} volume ≥ {self.level:g}× normal"
+        if self.kind == "funding":
+            return f"{self.symbol} perp funding ≥ ±{self.level:g}%"
+        if self.kind == "liq":
+            return f"{self.symbol} liquidation ≥ {fmt_price(self.level)} USDT"
         return f"{self.symbol} {self.kind} {fmt_price(self.level)}"
 
 
@@ -69,6 +78,8 @@ def valid_level(kind: str, level: float) -> bool:
         return 0 < level < 10_000
     if kind == "volume":
         return 1 < level < math.inf
+    if kind == "funding":
+        return 0 < level < 10  # percent per funding interval; exchanges cap rates far below this
     return 0 < level < math.inf
 
 
@@ -96,9 +107,9 @@ def parse_alert(args: list[str]) -> Alert:
         window = int(match[1]) * (60 if match[2] == "h" else 1)
         if not 1 <= window <= MAX_WINDOW:
             raise ValueError(f"window must be 1m to {MAX_WINDOW // 60}h")
-    unit = {"move": "%", "spread": "bp", "volume": "x"}.get(kind, "")
+    unit = {"move": "%", "spread": "bp", "volume": "x", "funding": "%"}.get(kind, "")
     scale = 1.0
-    if kind == "print" and raw[-1:] in SUFFIXES:
+    if kind in ("print", "liq") and raw[-1:] in SUFFIXES:
         raw, scale = raw[:-1], SUFFIXES[raw[-1]]
     try:
         level = float(raw.removesuffix(unit) if unit else raw) * scale
@@ -106,7 +117,8 @@ def parse_alert(args: list[str]) -> Alert:
         level = math.nan
     if not valid_level(kind, level):
         raise ValueError({"move": "move must be between 0 and 100%", "spread": "spread must be between 0 and 10000 bp",
-                          "volume": "volume must be more than 1x"}.get(kind, "price must be a positive number"))
+                          "volume": "volume must be more than 1x", "funding": "funding must be between 0 and 10%",
+                          "liq": "liq must be a positive USDT amount"}.get(kind, "price must be a positive number"))
     return Alert(symbol, kind, level, window=window)
 
 
@@ -152,6 +164,7 @@ class Watcher:
         self.alerts: list[Alert] = []
         self._state: dict[Alert, _State] = {}
         self._last_trade: dict[str, int] = {}
+        self._funding: dict[tuple[str, str], float] = {}  # (pair, venue) -> latest funding rate
         self.set_alerts(alerts)
 
     def set_alerts(self, alerts):
@@ -163,6 +176,10 @@ class Watcher:
     def trade_symbols(self) -> list[str]:
         return sorted({a.symbol for a in self.alerts if a.kind in TRADE_KINDS})
 
+    @property
+    def perp_symbols(self) -> list[str]:
+        return sorted({a.symbol for a in self.alerts if a.kind in PERP_KINDS})
+
     def warming(self, alert: Alert) -> float:
         """Volume alerts: seconds of unbroken trade data still needed before they can fire."""
         s = self._state.get(alert)
@@ -173,7 +190,7 @@ class Watcher:
     def on_tick(self, tick: Tick) -> list[Fired]:
         now, fired = self.clock(), []
         for a in list(self.alerts):
-            if a.symbol != tick.symbol or a.kind in TRADE_KINDS:
+            if a.symbol != tick.symbol or a.kind in (*TRADE_KINDS, *PERP_KINDS):
                 continue
             if not a.repeats:
                 if triggered(a, tick.price):
@@ -217,6 +234,37 @@ class Watcher:
                 message = self._volume(a, s, now, trade.size, gap)
             if message:
                 fired.append(Fired(a, message))
+        return fired
+
+    def on_funding(self, symbol: str, venue: str, rate: float | None) -> list[Fired]:
+        """A perp feed's latest funding rate (None: its connection dropped, so the rate is unknown)."""
+        if rate is None:
+            self._funding.pop((symbol, venue), None)
+            return []  # nothing to compare: keep the alert's state until a rate comes back
+        self._funding[(symbol, venue)] = rate
+        rates = {v: r for (s, v), r in self._funding.items() if s == symbol}
+        worst = max(rates, key=lambda v: abs(rates[v]))  # the venue furthest from zero
+        now, fired = self.clock(), []
+        for a in self.alerts:
+            if a.symbol == symbol and a.kind == "funding":
+                others = " · ".join(f"{v} {r * 100:+.4f}%" for v, r in sorted(rates.items()) if v != worst)
+                message = self._edge(self._state[a], now, abs(rates[worst]) * 100 >= a.level,
+                                     f"{symbol} perp funding {rates[worst] * 100:+.4f}% on {worst}"
+                                     + (f" ({others})" if others else ""))
+                if message:
+                    fired.append(Fired(a, message))
+        return fired
+
+    def on_liquidation(self, symbol: str, liq) -> list[Fired]:
+        """`liq` is a derivs.Liquidation. Each one is checked on its own, never summed."""
+        now, fired = self.clock(), []
+        for a in self.alerts:
+            if a.symbol == symbol and a.kind == "liq" and liq.notional >= a.level:
+                message = self._event(self._state[a], now, f"{symbol} {'long' if liq.long else 'short'} liquidated on "
+                                      f"{liq.venue}: {fmt_price(liq.notional)} USDT ({fmt_price(liq.size)} "
+                                      f"{symbol.partition('-')[0]} at {fmt_price(liq.price)})")
+                if message:
+                    fired.append(Fired(a, message))
         return fired
 
     def _move(self, a: Alert, s: _State, now: float, price: float) -> str | None:
