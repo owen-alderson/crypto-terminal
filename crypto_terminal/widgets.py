@@ -1,5 +1,7 @@
+import math
 import time
 from collections import deque
+from datetime import datetime, timezone
 from itertools import accumulate, islice
 
 from rich.text import Text
@@ -11,6 +13,7 @@ from textual.widgets.option_list import Option
 from . import chart
 from .chart import fmt_price
 from .book import BookFeed, big_threshold, default_step, flow, group_steps, prints, step_decimals
+from .derivs import PerpFeed
 from .feed import STALE_AFTER, Tick
 from .history import Candle, Product, apply_tick
 from .indicators import ema, sma, vwap
@@ -353,9 +356,8 @@ class VenuesPane(Widget):
             text = f"{name:<{self.NAME_W}}{fmt_price(bid):>{price_w}}{fmt_price(ask):>{price_w}}"
             if bp is None:
                 return Text(text)
-            # at most 5 characters (+1.43, +11.9, +150): 0.01 bp is ~8 cents on BTC, finer than venues differ by
-            places = 2 if abs(bp) < 10 else 1 if abs(bp) < 100 else 0
-            return Text(text) + Text(f"{bp:+.{places}f}".rjust(self.BP_W), style=AXIS)
+            # 0.01 bp is ~8 cents on BTC, finer than venues differ by
+            return Text(text) + Text(fmt_signed_bp(bp).rjust(self.BP_W), style=AXIS)
 
         if coinbase_mid is None:
             status = self.coinbase_status if self.coinbase_status != "live" else "waiting for a quote"
@@ -375,4 +377,86 @@ class VenuesPane(Widget):
             note = f"₮ USDT at {rate:.5f} {quote} (Coinbase)" if rate else "₮ USDT: waiting for Coinbase rate"
             lines.append(Text(note[:width], style=AXIS))
         lines.append(Text("vs CB: mid vs Coinbase mid, bp"[:width], style=AXIS))
+        return Text("\n").join(lines)
+
+
+def fmt_amount(value: float) -> str:
+    """Four significant figures with k/m/b: 93,472.1 -> 93.47k, so open interest fits a narrow column."""
+    for suffix, size in (("b", 1e9), ("m", 1e6), ("k", 1e3), ("", 1)):
+        if value >= size or not suffix:
+            scaled = value / size
+            return f"{scaled:.{max(0, 3 - math.floor(math.log10(scaled))) if scaled > 0 else 0}f}{suffix}"
+
+
+def fmt_until(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{seconds % 60:02d}s"
+
+
+def fmt_signed_bp(bp: float) -> str:
+    """At most 5 characters (+1.43, +11.9, +150), as in the other-exchanges pane."""
+    return f"{bp:+.{2 if abs(bp) < 10 else 1 if abs(bp) < 100 else 0}f}"
+
+
+class DerivsPane(Widget):
+    """Perpetual futures for the selected pair (derivs.py): one column per exchange, then the liquidations tape."""
+
+    DEFAULT_CSS = "DerivsPane { width: 35; height: 18; border-left: solid #ffb000; }"
+    LABEL_W = 10  # the rest is split between the exchanges
+
+    def on_mount(self):
+        self.symbol: str | None = None
+        self.feeds: list[PerpFeed] = []
+        self.since = time.time()  # liquidations are not backfilled: the tape starts when the feeds open
+        self.set_interval(REDRAW_EVERY, self.refresh)
+
+    def render(self):
+        width, height = self.size.width, self.size.height
+        pair = self.feeds[0].pair if self.feeds else ""
+        lines = [Text(f"{self.symbol or '—'} perps{f' ({pair})' if pair else ''}"[:width], style=f"bold {AMBER}")]
+        if not self.symbol or not self.feeds:
+            return Text("\n").join(lines)
+        col_w = max(0, (width - self.LABEL_W) // len(self.feeds))
+        live = [f.funding is not None for f in self.feeds]  # the rest clears with funding when a link drops
+
+        def row(label, cells, styles=None):
+            line = Text(f"{label:<{self.LABEL_W}}"[:self.LABEL_W], style=AXIS)
+            for i, cell in enumerate(cells):
+                line.append(f"{cell:>{col_w}}"[-col_w:] if col_w else "", style=(styles or {}).get(i, ""))
+            return line
+
+        now, wall = time.monotonic(), time.time()
+        funding = [f"{f.funding * 100:+.4f}%" if ok else "—" for f, ok in zip(self.feeds, live)]
+        colours = {i: GREEN if f.funding > 0 else RED if f.funding < 0 else ""
+                   for i, (f, ok) in enumerate(zip(self.feeds, live)) if ok}
+        lines += [
+            row("", [f.NAME for f in self.feeds]),
+            row("funding", funding, colours),
+            row("premium bp", [fmt_signed_bp(f.premium) if ok and f.premium is not None else "—"
+                               for f, ok in zip(self.feeds, live)]),
+            row(f"OI {self.symbol.partition('-')[0]}", [fmt_amount(f.oi) if f.oi is not None else "—" for f in self.feeds]),
+            row("OI Δ15m", [f"{c:+.2f}%" if (c := f.oi_change(now)) is not None else "—" for f in self.feeds]),
+            row("next fund", [fmt_until(f.next_funding - wall) if ok else "—" for f, ok in zip(self.feeds, live)]),
+            row("interval", [f"{f.interval}h" if ok and f.interval else "—" for f, ok in zip(self.feeds, live)]),
+        ]
+        for feed, ok in zip(self.feeds, live):
+            if not ok:  # status carries server text: Text, never markup
+                status = "waiting for data" if feed.status == "live" else feed.status
+                lines.append(Text(f"{feed.NAME}: {status}"[:width], style=AXIS))
+
+        since = datetime.fromtimestamp(self.since, timezone.utc).strftime("%H:%M")
+        lines.append(Text(f"liquidations, USDT · since {since}"[:width], style=f"bold {AMBER}"))
+        liqs = sorted((liq for feed in self.feeds for liq in feed.liqs), key=lambda liq: liq.at, reverse=True)
+        if not liqs:
+            lines.append(Text("none yet", style=AXIS))
+        for liq in liqs[:max(0, height - len(lines) - 1)]:
+            side = "long" if liq.long else "short"
+            body = f"{liq.time} {liq.venue:<7} {side:<5}"
+            line = Text(body, style=AXIS)
+            # a closed long is a forced sell (red), a closed short a forced buy (green)
+            line.append(f"{fmt_amount(liq.notional):>{max(0, width - len(body))}}", style=RED if liq.long else GREEN)
+            lines.append(line)
+        lines = lines[:max(0, height - 1)]
+        lines.append(Text("Binance: max 1/s, a lower bound"[:width], style=AXIS))
         return Text("\n").join(lines)

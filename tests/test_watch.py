@@ -88,3 +88,39 @@ async def test_watch_with_no_alerts_says_how_to_add_them(setup):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_watch_opens_perp_feeds_for_funding_and_liq_alerts(setup, monkeypatch):
+    from crypto_terminal.derivs import BinancePerp, BybitPerp
+
+    perps = []
+
+    def fake(cls):
+        class Fake(cls):
+            async def run(self):
+                perps.append(self)
+                self._status("live")
+                await asyncio.Event().wait()
+        return Fake
+
+    monkeypatch.setattr(watch_module, "PERPS", (fake(BinancePerp), fake(BybitPerp)))
+    _, desktop, _ = setup
+    app_module.save_alerts([Alert("BTC-USD", ">", 1e9), Alert("ETH-USD", "funding", 0.05)])
+    out, err = [], []
+    task = asyncio.create_task(watch(out.append, err.append))
+    await asyncio.sleep(0.1)
+    assert FakeFeed.instances[-1].symbols == ["BTC-USD", "ETH-USD"]
+    assert [(p.NAME, p.symbol) for p in perps] == [("Binance", "ETH-USD"), ("Bybit", "ETH-USD")]
+    assert any(line.endswith("Bybit ETH-USD perp live") for line in err)  # connection news on stderr
+    perps[1].handle({"topic": "tickers.ETHUSDT", "type": "snapshot", "data": {
+        "markPrice": "2366.1", "indexPrice": "2366.5", "fundingIntervalHour": "8", "fundingRate": "-0.0007",
+        "nextFundingTime": "1792080000000"}})
+    await asyncio.sleep(0.01)
+    assert desktop == ["ETH-USD perp funding -0.0700% on Bybit"] and out[0].endswith(desktop[0])
+
+    app_module.save_alerts([Alert("BTC-USD", ">", 1e9)])  # perp alert removed: its feeds close
+    await asyncio.sleep(0.2)
+    assert len(perps) == 2 and len(FakeFeed.instances) == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

@@ -10,10 +10,11 @@ import pytest
 from crypto_terminal import app as app_module
 from crypto_terminal.app import TerminalApp
 from crypto_terminal.book import BookFeed, Trade
+from crypto_terminal.derivs import BinancePerp, BybitPerp
 from crypto_terminal.feed import Tick
 from crypto_terminal.history import Candle, Product
 from crypto_terminal.theme import GREEN, RED
-from crypto_terminal.widgets import ChartPane, DepthPane, PairPicker, PriceTable, VenuesPane
+from crypto_terminal.widgets import ChartPane, DepthPane, DerivsPane, PairPicker, PriceTable, VenuesPane
 
 PRODUCTS = [Product(f"{base}-{quote}", base, quote, name) for base, name in
             (("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("XRP", "XRP"), ("SOL", "Solana"), ("ADA", "Cardano"),
@@ -52,9 +53,26 @@ class FakeBookFeed(BookFeed):
         await asyncio.Event().wait()
 
 
+PERP_FEEDS = []  # every perp feed the app opened, in order
+
+
+def fake_perp(cls):
+    """The real parsing; only the connection is fake. Tests push messages with `handle`."""
+    class Fake(cls):
+        async def run(self):
+            PERP_FEEDS.append(self)
+            if not self.pair:
+                return await super().run()
+            self._status("live")
+            await asyncio.Event().wait()
+    return Fake
+
+
 @pytest.fixture
 def offline(tmp_path, monkeypatch):
     FakeFeed.instances, FakeBookFeed.instances = [], []
+    PERP_FEEDS.clear()
+    monkeypatch.setattr(app_module, "PERPS", (fake_perp(BinancePerp), fake_perp(BybitPerp)))
     path = tmp_path / "watchlist.json"
     monkeypatch.setattr(app_module, "WATCHLIST_FILE", path)
     monkeypatch.setattr(app_module, "CONFIG_FILE", tmp_path / "config.json")
@@ -610,3 +628,104 @@ async def test_x_shows_other_exchanges_for_the_selected_pair_and_closes_them(off
         await pilot.press("x")
         await pilot.pause()
         assert not pane.display and not [w for w in app.workers if w.group == "venues" and w.is_running]
+
+
+async def test_d_shows_perps_for_the_selected_pair_and_closes_them(offline, monkeypatch):
+    from tests.test_derivs import BINANCE_LIQ, BINANCE_MARK, BYBIT_TICKER
+
+    monkeypatch.setattr(time, "time", lambda: 1792074302.0)  # 14:25:02 UTC, 1h34m58s before the 16:00 funding
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        pane = app.query_one(DerivsPane)
+        assert not pane.display and PERP_FEEDS == []
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        assert pane.display and [(f.NAME, f.pair) for f in PERP_FEEDS] == [("Binance", "BTCUSDT"), ("Bybit", "BTCUSDT")]
+        binance, bybit = PERP_FEEDS
+        assert "Binance: waiting for data" in pane.render().plain
+        binance.handle(BINANCE_MARK)
+        binance.interval = 8  # from the REST fundingInfo call, which the fake skips
+        binance.add_oi(93472.108)
+        bybit.handle(BYBIT_TICKER)
+        bybit.handle({"topic": "allLiquidation.BTCUSDT", "type": "snapshot",
+                      "data": [{"T": 1792074300000, "s": "BTCUSDT", "S": "Sell", "v": "0.5", "p": "81500"}]})
+        binance.handle(BINANCE_LIQ)
+        text = pane.render().plain
+        assert text.splitlines()[:8] == [
+            "BTC-USD perps (BTCUSDT)",
+            "               Binance       Bybit",
+            "funding       -0.0008%    +0.0044%",
+            "premium bp       -3.76       -3.36",
+            "OI BTC          93.47k      30.33k",  # Bybit's single-sided open interest
+            "OI Δ15m              —           —",  # not 15 minutes of samples yet
+            "next fund        1h34m       1h34m",
+            "interval            8h          8h",
+        ]
+        lines = text.splitlines()
+        tape = lines[lines.index("liquidations, USDT · since 14:25") + 1:]
+        assert tape == ["14:30:21 Binance long       11.02k", "14:25:00 Bybit   short      40.75k",
+                        "Binance: max 1/s, a lower bound"]
+
+        bybit.on_status("reconnecting in 2s (closed)")
+        text = pane.render().plain
+        assert "funding       -0.0008%           —" in text and "Bybit: reconnecting in 2s (closed)" in text
+        assert "OI BTC          93.47k           —" in text  # nothing from a dropped link
+
+        await pilot.press("down")  # ETH-USD
+        await pilot.pause(0.2)
+        assert [f.pair for f in PERP_FEEDS[-2:]] == ["ETHUSDT", "ETHUSDT"]
+        text = pane.render().plain
+        assert "ETH-USD perps" in text and "93.47k" not in text and "none yet" in text  # never the last pair's
+        await pilot.press("d")
+        await pilot.pause()
+        assert not pane.display and not [w for w in app.workers if w.group == "derivs" and w.is_running]
+
+
+async def test_perp_pane_says_when_a_pair_has_no_perp(offline):
+    (offline.parent / "watchlist.json").write_text(json.dumps({"symbols": ["BTC-EUR"]}))
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        text = app.query_one(DerivsPane).render().plain
+        assert "Binance: no USDT perp" in text and "Bybit: no USDT perp" in text
+
+
+async def test_funding_and_liq_alerts_open_perp_feeds_only_for_their_pairs(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        assert PERP_FEEDS == []  # no perp alerts: no perp connections
+        await type_command(pilot, "alert ETH-USD liq 100k")
+        await type_command(pilot, "alert ETH-USD funding 0.05%")
+        await pilot.pause()
+        assert [(f.NAME, f.symbol) for f in PERP_FEEDS] == [("Binance", "ETH-USD"), ("Bybit", "ETH-USD")]
+        binance, bybit = PERP_FEEDS
+        binance.handle({**BINANCE_FUNDING, "r": "0.0006"})
+        bybit.handle({"topic": "allLiquidation.ETHUSDT", "type": "snapshot",
+                      "data": [{"T": 1792074622444, "s": "ETHUSDT", "S": "Buy", "v": "50", "p": "2358.95"}]})
+        await pilot.pause()
+        assert DESKTOP == ["ETH-USD perp funding +0.0600% on Binance",
+                           "ETH-USD long liquidated on Bybit: 117,947.50 USDT (50.000 ETH at 2,358.95)"]
+        await type_command(pilot, "alert BTC-USD > 1000000")  # not a perp alert: the perp feeds stay open
+        await pilot.pause()
+        assert len(PERP_FEEDS) == 2
+        await type_command(pilot, "unalert 1")
+        await type_command(pilot, "unalert 1")
+        await pilot.pause()
+        assert not [w for w in app.workers if w.group == "perp-alerts" and w.is_running]
+
+        await type_command(pilot, "alert ETH-USD liq 100k")
+        await pilot.pause()
+        (offline.parent / "watch.pid").write_text(str(os.getpid()))  # a running watch checks them instead
+        await pilot.pause(1.2)
+        PERP_FEEDS[-1].handle({"topic": "allLiquidation.ETHUSDT", "type": "snapshot",
+                               "data": [{"T": 1792074622444, "s": "ETHUSDT", "S": "Buy", "v": "50", "p": "2358.95"}]})
+        await pilot.pause()
+        assert len(DESKTOP) == 2
+
+
+BINANCE_FUNDING = {"e": "markPriceUpdate", "E": 1792074305000, "s": "ETHUSDT", "p": "2366.1", "i": "2366.5",
+                   "r": "0.0001", "T": 1792080000000}

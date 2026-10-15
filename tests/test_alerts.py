@@ -255,3 +255,66 @@ async def test_push_posts_the_message_and_reports_failures():
         assert sent[0].content.decode() == "BTC-USD > 90,000.00 · now 90,001.00"
         assert sent[0].headers["Title"] == "crypto-terminal alert"
         assert await push(client, "https://ntfy.sh/down", "x") == "push to https://ntfy.sh/down failed (HTTPStatusError)"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("alert BTC-USD funding 0.05%", Alert("BTC-USD", "funding", 0.05)),
+    ("alert eth-usd FUNDING 0.1", Alert("ETH-USD", "funding", 0.1)),
+    ("alert BTC-USD liq 1m", Alert("BTC-USD", "liq", 1_000_000)),
+    ("alert BTC-USD liq 250K", Alert("BTC-USD", "liq", 250_000)),
+])
+def test_parse_perp_alerts(text, expected):
+    assert parse_command(text) == ("alert", expected)
+    assert expected.repeats and valid_alert(expected)
+
+
+@pytest.mark.parametrize("text", [
+    "alert BTC-USD funding 0", "alert BTC-USD funding 10%", "alert BTC-USD funding -0.05%", "alert BTC-USD funding x",
+    "alert BTC-USD funding 0.05% 15m", "alert BTC-USD liq 0", "alert BTC-USD liq 1b", "alert BTC-USD liq nan",
+])
+def test_parse_perp_alerts_invalid(text):
+    with pytest.raises(ValueError):
+        parse_command(text)
+
+
+def test_funding_fires_on_either_venue_either_sign_once_a_minute():
+    now = [0.0]
+    funding, other = Alert("BTC-USD", "funding", 0.05), Alert("ETH-USD", "funding", 0.05)
+    w = Watcher([funding, other], clock=lambda: now[0])
+    assert w.perp_symbols == ["BTC-USD", "ETH-USD"] and w.trade_symbols == []
+    assert w.on_tick(Tick("BTC-USD", 100.0, 90.0)) == []  # perp alerts never read spot ticks
+    assert w.on_funding("BTC-USD", "Binance", 0.0001) == []
+    fired = w.on_funding("BTC-USD", "Bybit", -0.0006)
+    assert [f.message for f in fired] == ["BTC-USD perp funding -0.0600% on Bybit (Binance +0.0100%)"]
+    assert w.on_funding("BTC-USD", "Bybit", -0.0007) == []  # still true: edge-triggered
+    assert w.on_funding("BTC-USD", "Bybit", None) == []  # Bybit dropped: nothing to compare, state kept
+    assert w.on_funding("BTC-USD", "Binance", 0.0001) == []
+    now[0] = 30
+    assert w.on_funding("BTC-USD", "Binance", 0.0005) == []  # true again, within the cooldown: held back
+    now[0] = 100
+    assert w.on_funding("BTC-USD", "Binance", 0.0001) == []
+    fired = w.on_funding("BTC-USD", "Binance", 0.0008)
+    assert [f.message for f in fired] == ["BTC-USD perp funding +0.0800% on Binance · 1 more since the last alert"]
+
+
+def test_liq_fires_for_each_big_liquidation_never_summed():
+    from crypto_terminal.derivs import Liquidation
+
+    now = [0.0]
+    w = Watcher([Alert("BTC-USD", "liq", 100_000)], clock=lambda: now[0])
+    assert w.on_liquidation("BTC-USD", Liquidation("Binance", 0, True, 1.0, 80_000.0)) == []
+    assert w.on_liquidation("BTC-USD", Liquidation("Binance", 0, True, 1.0, 80_000.0)) == []  # 160k together: no
+    assert w.on_liquidation("ETH-USD", Liquidation("Bybit", 0, False, 100.0, 2_000.0)) == []  # another pair
+    fired = w.on_liquidation("BTC-USD", Liquidation("Bybit", 0, False, 1.5, 80_000.0))
+    assert [f.message for f in fired] == ["BTC-USD short liquidated on Bybit: 120,000.00 USDT (1.5000 BTC at 80,000.00)"]
+    now[0] = 61
+    fired = w.on_liquidation("BTC-USD", Liquidation("Binance", 0, True, 2.0, 80_000.0))
+    assert fired[0].message.startswith("BTC-USD long liquidated on Binance: 160,000.00 USDT")
+
+
+def test_perp_alerts_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "ALERTS_FILE", tmp_path / "alerts.json")
+    alerts = [Alert("BTC-USD", "funding", 0.05), Alert("BTC-USD", "liq", 1e6)]
+    save_alerts(alerts)
+    assert load_alerts() == alerts
+    assert [str(a) for a in alerts] == ["BTC-USD perp funding ≥ ±0.05%", "BTC-USD liquidation ≥ 1,000,000.00 USDT"]
