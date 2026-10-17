@@ -334,8 +334,8 @@ class TerminalApp(App):
     def deliver(self, fired: list[Fired]):
         if not fired:
             return
-        if any(not f.alert.repeats for f in fired):  # one-shot alerts are gone
-            self.alerts_changed()
+        if gone := [f.alert for f in fired if not f.alert.repeats]:  # one-shot alerts are gone
+            self.alerts_changed(removed=gone)
         self.bell()
         for f in fired:
             self.notify(f.message, title="🔔 alert", severity="error", timeout=15, markup=False)
@@ -571,8 +571,9 @@ class TerminalApp(App):
             if arg > len(self.alerts):
                 self.notify(f"no alert {arg} (see `alerts`)", severity="error")
             else:
-                self.notify(f"removed: {self.alerts.pop(arg - 1)}", markup=False)
-                self.alerts_changed()
+                removed = self.alerts[arg - 1]
+                self.alerts_changed(removed=[removed])
+                self.notify(f"removed: {removed}", markup=False)
         elif arg not in self.symbols:
             self.notify(f"{arg} is not on the watchlist", severity="error")
         else:
@@ -640,13 +641,19 @@ class TerminalApp(App):
                 self.notify(f"no price for {alert.symbol} yet: try again in a moment", severity="error")
                 return
             alert = Alert(alert.symbol, alert.kind, alert.level, ref)
-        self.alerts.append(alert)
-        self.alerts_changed()
+        self.alerts_changed(added=[alert])
         self.notify(f"alert set: {alert}", markup=False)
 
-    def alerts_changed(self):
-        self.watcher.set_alerts(self.alerts)
-        save_alerts(self.alerts)
+    def alerts_changed(self, added=(), removed=()):
+        """Apply this change to the latest file, not to our own copy: an alert another process (MCP, watch, a second
+        terminal) wrote since we last synced is kept rather than saved over."""
+        alerts = load_alerts()
+        for alert in removed:
+            if alert in alerts:
+                alerts.remove(alert)
+        alerts += added
+        self.watcher.set_alerts(alerts)
+        save_alerts(alerts)
         self.alerts_seen = alerts_mtime()
         self.alerts_marked()
 

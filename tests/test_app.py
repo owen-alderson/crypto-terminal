@@ -312,6 +312,26 @@ async def test_alerts_list_unalert_and_persist(offline):
         assert app2.query_one(PriceTable).get_cell("ETH-USD", "sym").plain == "ETH-USD 🔔"
 
 
+async def test_terminal_saves_keep_alerts_another_process_just_added(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        feed = FakeFeed.instances[-1]
+        await type_command(pilot, "alert BTC-USD > 100")
+        await type_command(pilot, "alert ETH-USD < 50")
+        mcp = app_module.Alert("SOL-USD", "print", 500_000)
+        # added by MCP just now: the terminal syncs once a second and hasn't read it yet
+        app_module.save_alerts([*app_module.load_alerts(), mcp])
+        feed.on_tick(Tick("BTC-USD", 100.5, 90.0))  # a one-shot fires and is removed
+        assert app_module.load_alerts() == [app_module.Alert("ETH-USD", "<", 50), mcp]
+        app_module.save_alerts([*app_module.load_alerts(), app_module.Alert("XRP-USD", "spread", 5)])
+        await type_command(pilot, "unalert 1")
+        await type_command(pilot, "alert ADA-USD > 2")
+        assert app_module.load_alerts() == [mcp, app_module.Alert("XRP-USD", "spread", 5),
+                                            app_module.Alert("ADA-USD", ">", 2)]
+        assert app.alerts == app_module.load_alerts()
+
+
 async def test_bracket_keys_step_timeframe_and_clamp(offline):
     app = TerminalApp()
     async with app.run_test(size=(150, 40)) as pilot:
