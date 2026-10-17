@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone.
+A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone. Prices, the book, other exchanges and perps are also one-shot commands with `--json`, and an MCP server lets Claude read the same live data and set alerts.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, price grouping, indicators, coin search, a price alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -111,6 +111,50 @@ Each alert prints one line to stdout, so `crypto-terminal watch >> ~/crypto-aler
 
 **Push to your phone**: install the free [ntfy](https://ntfy.sh) app, subscribe to a topic, then run `push <topic>` in the terminal (it sends a test). Anyone who knows a topic name on ntfy.sh can read it, so pick a long random one (`push crypto-7f3k9q2m`), or run your own server: `push https://ntfy.example.com/alerts`.
 
+## Scripts and Claude
+
+One-shot snapshots, from the same feeds and checks as the terminal's panels:
+
+```console
+$ crypto-terminal price BTC-USD ETH-USD
+BTC-USD         81,445.36  +0.51% 24h  bid 81,445.36 · ask 81,445.37 · spread 0.0012 bp
+ETH-USD          2,416.33  +0.56% 24h  bid 2,416.32 · ask 2,416.33 · spread 0.041 bp
+
+$ crypto-terminal book BTC-USD --depth 3
+BTC-USD book on Coinbase · grouped by 10 · spread 0.0012 bp
+  ask 81,470.00  2.01535224
+  ask 81,460.00  3.29623002
+  ask 81,450.00  0.47487558
+  ─── best bid 81,445.36 · ask 81,445.37
+  bid 81,440.00  0.31974371
+  bid 81,430.00  3.02482944
+  bid 81,420.00  3.43443475
+
+$ crypto-terminal venues BTC-USD
+BTC-USD on other exchanges · Coinbase bid 81,445.36 · ask 81,445.37
+  Kraken   bid 81,449.8 · ask 81,449.9 USD  +0.55 bp vs Coinbase
+  Binance  bid 81,559.85 · ask 81,559.86 USDT  +0.79 bp vs Coinbase
+  Bybit    bid 81,555.2 · ask 81,555.3 USDT  +0.22 bp vs Coinbase
+  OKX      bid 81,555.1 · ask 81,555.2 USDT  +0.21 bp vs Coinbase
+  USDT prices converted at 0.998675 USD (Coinbase USDT-USD mid)
+
+$ crypto-terminal perps BTC-USD
+BTC-USD perpetual futures (BTCUSDT, not spot)
+  Binance  funding +0.0028% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -5.03 bp · OI 93,764.384 BTC
+  Bybit    funding +0.0066% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -4.35 bp · OI 29,605.919 BTC
+```
+
+Add `--json` to any of them for scripts and pipes: `crypto-terminal price BTC-USD --json | jq '.[0].price'`. `book` takes `--group` (a price step: `--group 100` for $100 on BTC; it lists the valid steps if you pick another) and `--depth`. Grouped asks round up and bids round down, as in the terminal, so a level never looks better than what's on offer. Prices print with every decimal the exchange sent. `venues` and `perps` open those exchanges' streams and wait until each has answered (usually a few seconds, at most 15), and read Coinbase while the streams are still open, so both sides of a comparison are from the same moment; one that hasn't answered says `no data within 15s` instead of showing an old or made-up number. A failed lookup (unknown pair, network down) prints why and exits 1.
+
+**MCP server**: lets Claude answer "is BTC cheaper on Kraken right now?" or "how crowded is the ETH long?" from live data, and set alerts for you.
+
+```bash
+pipx install 'crypto-terminal[mcp]'     # or: pipx inject crypto-terminal mcp
+claude mcp add crypto-terminal -- crypto-terminal mcp
+```
+
+Tools: `price`, `book`, `venues`, `perps`, `list_alerts`, `set_alert` (the terminal's syntax: `BTC-USD move 2% 15m`), `remove_alert` (by number and the alert's text, so a renumbered list never removes the wrong one). Alerts go into the same file the terminal and `watch` read, and `set_alert` tells Claude whether anything is running that will check it.
+
 ## From source
 
 ```bash
@@ -132,6 +176,8 @@ crypto_terminal/
   indicators.py  SMA, EMA, RSI, VWAP as pure functions
   alerts.py      alert rules, the watcher (windows, cooldowns, warm-up), desktop + ntfy notifications
   watch.py       `crypto-terminal watch`: alerts with no screen
+  snapshot.py    one-shot price, book, venues and perps for the CLI and the MCP server
+  mcp_server.py  `crypto-terminal mcp`: the MCP tools
   venues.py      Kraken, Binance, Bybit, OKX best bid/ask feeds; USDT → USD conversion
   derivs.py      Binance + Bybit perp feeds: funding, premium, open interest, liquidations
   chart.py       the chart as a pure function: candles in, text lines out; wick tips exact to half a row, solid whole-row bodies

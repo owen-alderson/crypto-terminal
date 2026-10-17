@@ -14,9 +14,9 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, Static
 
-from .alerts import Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
+from .alerts import PERP_KINDS, Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
 from .book import BookFeed
-from .derivs import PERPS
+from .derivs import PERPS, perp_symbol
 from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
 from .theme import AMBER
@@ -334,8 +334,8 @@ class TerminalApp(App):
     def deliver(self, fired: list[Fired]):
         if not fired:
             return
-        if any(not f.alert.repeats for f in fired):  # one-shot alerts are gone
-            self.alerts_changed()
+        if gone := [f.alert for f in fired if not f.alert.repeats]:  # one-shot alerts are gone
+            self.alerts_changed(removed=gone)
         self.bell()
         for f in fired:
             self.notify(f.message, title="🔔 alert", severity="error", timeout=15, markup=False)
@@ -571,8 +571,9 @@ class TerminalApp(App):
             if arg > len(self.alerts):
                 self.notify(f"no alert {arg} (see `alerts`)", severity="error")
             else:
-                self.notify(f"removed: {self.alerts.pop(arg - 1)}", markup=False)
-                self.alerts_changed()
+                removed = self.alerts[arg - 1]
+                self.alerts_changed(removed=[removed])
+                self.notify(f"removed: {removed}", markup=False)
         elif arg not in self.symbols:
             self.notify(f"{arg} is not on the watchlist", severity="error")
         else:
@@ -630,19 +631,29 @@ class TerminalApp(App):
         if alert.symbol not in self.symbols:
             self.notify(f"{alert.symbol} is not on the watchlist: add it first", severity="error")
             return
+        if alert.kind in PERP_KINDS and not perp_symbol(alert.symbol):
+            self.notify(f"{alert.kind} alerts need a USD or USDT pair: there's no USDT perp for {alert.symbol}",
+                        severity="error")
+            return
         if alert.kind == "move" and not alert.window:  # a one-shot move counts from the price now
             ref = self.query_one(PriceTable).last_price(alert.symbol)
             if ref is None:
                 self.notify(f"no price for {alert.symbol} yet: try again in a moment", severity="error")
                 return
             alert = Alert(alert.symbol, alert.kind, alert.level, ref)
-        self.alerts.append(alert)
-        self.alerts_changed()
+        self.alerts_changed(added=[alert])
         self.notify(f"alert set: {alert}", markup=False)
 
-    def alerts_changed(self):
-        self.watcher.set_alerts(self.alerts)
-        save_alerts(self.alerts)
+    def alerts_changed(self, added=(), removed=()):
+        """Apply this change to the latest file, not to our own copy: an alert another process (MCP, watch, a second
+        terminal) wrote since we last synced is kept rather than saved over."""
+        alerts = load_alerts()
+        for alert in removed:
+            if alert in alerts:
+                alerts.remove(alert)
+        alerts += added
+        self.watcher.set_alerts(alerts)
+        save_alerts(alerts)
         self.alerts_seen = alerts_mtime()
         self.alerts_marked()
 

@@ -1,27 +1,160 @@
+import argparse
 import asyncio
+import json
 import signal
 import sys
+from decimal import Decimal
 
-USAGE = "usage: crypto-terminal          the terminal\n       crypto-terminal watch    check alerts with no screen"
+import httpx
+
+from .widgets import fmt_bp
+
+
+def places(*values) -> int:
+    """Decimals the most precise of `values` has: every digit the exchange sent, so 0.17798 and 0.177983 never both
+    read 0.17798. Rounded at 10 decimals first, which drops float noise (0.30000000000000004) and nothing real."""
+    return max((max(0, -Decimal(repr(round(v, 10))).normalize().as_tuple().exponent) for v in values if v is not None),
+               default=0)
+
+
+def exact(value: float, dp: int | None = None) -> str:
+    """Thousands separators and all of the number's decimals (padded to `dp`), never scientific notation."""
+    return f"{Decimal(repr(round(value, 10))):,.{places(value) if dp is None else dp}f}"
+
+
+def signed_bp(bp) -> str:
+    return "—" if bp is None else f"{bp:+.2f} bp"
+
+
+def show_price(rows: list[dict]) -> str:
+    lines = []
+    for r in rows:
+        dp = places(r["price"], r["bid"], r["ask"])
+        lines.append(f"{r['symbol']:<10} {exact(r['price'], dp):>14}  {r['change_24h_pct']:+.2f}% 24h  " + (
+            f"bid {exact(r['bid'], dp)} · ask {exact(r['ask'], dp)} · spread {fmt_bp(r['spread_bp'])} bp"
+            if r["bid"] else "no valid bid/ask"))
+    return "\n".join(lines)
+
+
+def show_book(b: dict) -> str:
+    ladder = b["asks"][::-1] + b["bids"]
+    dp = places(*(p for p, _ in ladder), b["bid"], b["ask"])
+    width = max(len(exact(p, dp)) for p, _ in ladder)
+    size_width = max(len(exact(s)) for _, s in ladder)
+    spread = f" · spread {fmt_bp(b['spread_bp'])} bp" if b["spread_bp"] is not None else ""
+    lines = [f"{b['symbol']} book on Coinbase · grouped by {exact(b['group'])}{spread}"]
+    lines += [f"  ask {exact(p, dp):>{width}}  {exact(s):>{size_width}}" for p, s in b["asks"][::-1]]
+    # the real best prices (grouping hides them), not the mid: it needs a decimal more than Coinbase quotes
+    best = [f"bid {exact(b['bid'], dp)}"] * bool(b["bid"]) + [f"ask {exact(b['ask'], dp)}"] * bool(b["ask"])
+    lines.append(f"  ─── best {' · '.join(best)}")
+    lines += [f"  bid {exact(p, dp):>{width}}  {exact(s):>{size_width}}" for p, s in b["bids"]]
+    return "\n".join(lines)
+
+
+def show_venues(v: dict) -> str:
+    cb = v["coinbase"]
+    dp = places(cb["bid"], cb["ask"])
+    lines = [f"{v['symbol']} on other exchanges · Coinbase bid {exact(cb['bid'], dp)} · ask {exact(cb['ask'], dp)}"
+             if cb["mid"] else f"{v['symbol']} · no Coinbase bid/ask to compare with"]
+    for row in v["venues"]:
+        if row["status"] == "live":
+            dp = places(row["bid"], row["ask"])
+            lines.append(f"  {row['exchange']:<8} bid {exact(row['bid'], dp)} · ask {exact(row['ask'], dp)} "
+                         f"{row['quote']}  {signed_bp(row['vs_coinbase_bp'])} vs Coinbase")
+        else:
+            lines.append(f"  {row['exchange']:<8} {row['status']}")
+    if v["usdt_rate"]:
+        lines.append(f"  USDT prices converted at {exact(v['usdt_rate'])} USD (Coinbase USDT-USD mid)")
+    return "\n".join(lines)
+
+
+def show_perps(p: dict) -> str:
+    lines = [f"{p['symbol']} perpetual futures ({p['perp']}, not spot)" if p["perp"] else f"{p['symbol']}: no USDT perp"]
+    for row in p["venues"]:
+        if row["status"] != "live":
+            lines.append(f"  {row['exchange']:<8} {row['status']}")
+            continue
+        interval = f" every {row['interval_h']}h" if row["interval_h"] else ""
+        coin = p["symbol"].partition("-")[0]
+        oi = f"OI {exact(row['open_interest'])} {coin}" if row["open_interest"] is not None else "OI unknown"
+        lines.append(f"  {row['exchange']:<8} funding {row['funding_pct']:+.4f}% (next {row['next_funding']}{interval})"
+                     f" · premium {signed_bp(row['premium_bp'])} · {oi}")
+    return "\n".join(lines)
+
+
+async def snapshot(args) -> tuple[object, str]:
+    from . import snapshot as snap
+
+    async with httpx.AsyncClient() as client:
+        if args.command == "price":
+            rows = await asyncio.gather(*(snap.price(client, s) for s in args.symbols))
+            return rows, show_price(rows)
+        if args.command == "book":
+            data = await snap.book(client, args.symbol, args.depth, args.group)
+            return data, show_book(data)
+        if args.command == "venues":
+            data = await snap.venues(client, args.symbol)
+            return data, show_venues(data)
+    data = await snap.perps(args.symbol)
+    return data, show_perps(data)
+
+
+def run_watch():
+    from .watch import watch
+
+    async def run():
+        # SIGTERM (kill, systemd, launchd) stops it like Ctrl-C does: cleanly, removing its pid file
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+        return await watch()
+
+    try:
+        sys.exit(asyncio.run(run()))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        sys.exit(0)
+
+
+def parser() -> argparse.ArgumentParser:
+    top = argparse.ArgumentParser(prog="crypto-terminal", description="With no command: the terminal.")
+    sub = top.add_subparsers(dest="command", metavar="command")
+    sub.add_parser("watch", help="check alerts with no screen")
+    as_json = argparse.ArgumentParser(add_help=False)
+    as_json.add_argument("--json", action="store_true", help="print JSON (for scripts and pipes)")
+    price = sub.add_parser("price", parents=[as_json], help="last price, 24h change and spread on Coinbase")
+    price.add_argument("symbols", nargs="+", metavar="PAIR", help="e.g. BTC-USD")
+    book = sub.add_parser("book", parents=[as_json], help="the order book on Coinbase")
+    book.add_argument("symbol", metavar="PAIR")
+    book.add_argument("--depth", type=int, default=10, help="levels a side (default 10)")
+    book.add_argument("--group", type=float, help="price step, e.g. 10 for $10 (default: about 1 bp of the price)")
+    for name, text in (("venues", "the pair on Kraken, Binance, Bybit and OKX vs Coinbase"),
+                       ("perps", "perp funding, premium and open interest on Binance and Bybit")):
+        sub.add_parser(name, parents=[as_json], help=text).add_argument("symbol", metavar="PAIR")
+    sub.add_parser("mcp", help="run the MCP server (stdio) for Claude and other clients")
+    return top
 
 
 def main():
-    args = sys.argv[1:]
-    if args == ["watch"]:
-        from .watch import watch
-
-        async def run():
-            # SIGTERM (kill, systemd, launchd) stops it like Ctrl-C does: cleanly, removing its pid file
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
-            return await watch()
-
+    args = parser().parse_args()
+    if args.command == "watch":
+        run_watch()
+    if args.command == "mcp":
         try:
-            sys.exit(asyncio.run(run()))
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            sys.exit(0)
-    if args:
-        print(USAGE, file=sys.stderr)
-        sys.exit(0 if args[0] in ("-h", "--help") else 2)
+            from .mcp_server import main as serve
+        except ImportError:
+            print("the MCP server needs the mcp package:  pipx install 'crypto-terminal[mcp]'  "
+                  "(or: pipx inject crypto-terminal mcp)", file=sys.stderr)
+            sys.exit(1)
+        serve()
+        return
+    if args.command:
+        try:
+            data, text = asyncio.run(snapshot(args))
+        except (LookupError, ValueError, httpx.HTTPError) as e:
+            print(f"crypto-terminal: {str(e) or type(e).__name__}", file=sys.stderr)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            sys.exit(130)
+        print(json.dumps(data, indent=2) if args.json else text)
+        return
     from .app import TerminalApp
     TerminalApp().run()
 

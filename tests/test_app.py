@@ -312,6 +312,26 @@ async def test_alerts_list_unalert_and_persist(offline):
         assert app2.query_one(PriceTable).get_cell("ETH-USD", "sym").plain == "ETH-USD 🔔"
 
 
+async def test_terminal_saves_keep_alerts_another_process_just_added(offline):
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        feed = FakeFeed.instances[-1]
+        await type_command(pilot, "alert BTC-USD > 100")
+        await type_command(pilot, "alert ETH-USD < 50")
+        mcp = app_module.Alert("SOL-USD", "print", 500_000)
+        # added by MCP just now: the terminal syncs once a second and hasn't read it yet
+        app_module.save_alerts([*app_module.load_alerts(), mcp])
+        feed.on_tick(Tick("BTC-USD", 100.5, 90.0))  # a one-shot fires and is removed
+        assert app_module.load_alerts() == [app_module.Alert("ETH-USD", "<", 50), mcp]
+        app_module.save_alerts([*app_module.load_alerts(), app_module.Alert("XRP-USD", "spread", 5)])
+        await type_command(pilot, "unalert 1")
+        await type_command(pilot, "alert ADA-USD > 2")
+        assert app_module.load_alerts() == [mcp, app_module.Alert("XRP-USD", "spread", 5),
+                                            app_module.Alert("ADA-USD", ">", 2)]
+        assert app.alerts == app_module.load_alerts()
+
+
 async def test_bracket_keys_step_timeframe_and_clamp(offline):
     app = TerminalApp()
     async with app.run_test(size=(150, 40)) as pilot:
@@ -691,6 +711,19 @@ async def test_perp_pane_says_when_a_pair_has_no_perp(offline):
         await pilot.pause(0.2)
         text = app.query_one(DerivsPane).render().plain
         assert "Binance: no USDT perp" in text and "Bybit: no USDT perp" in text
+
+
+async def test_terminal_rejects_funding_and_liq_alerts_without_usdt_perp(offline):
+    (offline.parent / "watchlist.json").write_text(json.dumps({"symbols": ["BTC-EUR"]}))
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await type_command(pilot, "alert BTC-EUR funding 0.05%")
+        await type_command(pilot, "alert BTC-EUR liq 100k")
+        messages = [n.message for n in app._notifications]
+        assert messages.count("funding alerts need a USD or USDT pair: there's no USDT perp for BTC-EUR") == 1
+        assert messages.count("liq alerts need a USD or USDT pair: there's no USDT perp for BTC-EUR") == 1
+        assert app.alerts == []
 
 
 async def test_funding_and_liq_alerts_open_perp_feeds_only_for_their_pairs(offline):

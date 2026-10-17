@@ -70,6 +70,21 @@ async def test_watch_fires_saves_reloads_and_cleans_up(setup):
     assert not (tmp_path / "watch.pid").exists()
 
 
+async def test_watch_one_shot_fire_keeps_alerts_added_just_before_it(setup):
+    _, _, _ = setup
+    app_module.save_alerts([Alert("BTC-USD", ">", 100)])
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0.1)
+    feed = FakeFeed.instances[-1]
+    app_module.save_alerts([Alert("BTC-USD", ">", 100), Alert("ETH-USD", "print", 1000)])  # concurrent add
+    feed.on_tick(Tick("BTC-USD", 100.5, 90.0))
+    await asyncio.sleep(0.02)
+    assert app_module.load_alerts() == [Alert("ETH-USD", "print", 1000)]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_only_one_watch_at_a_time(setup):
     tmp_path, _, _ = setup
     (tmp_path / "watch.pid").write_text(str(os.getpid()))  # a live process
