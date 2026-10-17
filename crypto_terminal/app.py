@@ -14,9 +14,9 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, Static
 
-from .alerts import Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
+from .alerts import PERP_KINDS, Alert, Fired, Watcher, desktop_notify, parse_alert, push, push_url, valid_alert
 from .book import BookFeed
-from .derivs import PERPS
+from .derivs import PERPS, perp_symbol
 from .feed import STALE_AFTER, Feed, Tick
 from .history import GRANULARITIES, SYMBOL_RE, fetch_candles, fetch_products, product_exists, search_products
 from .theme import AMBER
@@ -629,6 +629,10 @@ class TerminalApp(App):
         # ticks only arrive for watchlist pairs, so an alert anywhere else could never fire
         if alert.symbol not in self.symbols:
             self.notify(f"{alert.symbol} is not on the watchlist: add it first", severity="error")
+            return
+        if alert.kind in PERP_KINDS and not perp_symbol(alert.symbol):
+            self.notify(f"{alert.kind} alerts need a USD or USDT pair: there's no USDT perp for {alert.symbol}",
+                        severity="error")
             return
         if alert.kind == "move" and not alert.window:  # a one-shot move counts from the price now
             ref = self.query_one(PriceTable).last_price(alert.symbol)

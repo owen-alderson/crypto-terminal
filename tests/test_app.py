@@ -693,6 +693,19 @@ async def test_perp_pane_says_when_a_pair_has_no_perp(offline):
         assert "Binance: no USDT perp" in text and "Bybit: no USDT perp" in text
 
 
+async def test_terminal_rejects_funding_and_liq_alerts_without_usdt_perp(offline):
+    (offline.parent / "watchlist.json").write_text(json.dumps({"symbols": ["BTC-EUR"]}))
+    app = TerminalApp()
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await type_command(pilot, "alert BTC-EUR funding 0.05%")
+        await type_command(pilot, "alert BTC-EUR liq 100k")
+        messages = [n.message for n in app._notifications]
+        assert messages.count("funding alerts need a USD or USDT pair: there's no USDT perp for BTC-EUR") == 1
+        assert messages.count("liq alerts need a USD or USDT pair: there's no USDT perp for BTC-EUR") == 1
+        assert app.alerts == []
+
+
 async def test_funding_and_liq_alerts_open_perp_feeds_only_for_their_pairs(offline):
     app = TerminalApp()
     async with app.run_test(size=(150, 40)) as pilot:

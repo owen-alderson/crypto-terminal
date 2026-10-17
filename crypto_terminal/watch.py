@@ -52,8 +52,14 @@ async def watch(out=lambda line: print(line, flush=True),  # flushed: `>> alerts
 
         def deliver(fired):
             nonlocal seen
-            if any(not f.alert.repeats for f in fired):  # one-shot alerts are gone: write that back
-                config.save_alerts(watcher.alerts)
+            gone = [f.alert for f in fired if not f.alert.repeats]
+            if gone:  # one-shot alerts are gone: remove exactly those from the latest file, keeping concurrent adds
+                alerts = config.load_alerts()
+                for alert in gone:
+                    if alert in alerts:
+                        alerts.remove(alert)
+                watcher.set_alerts(alerts)
+                config.save_alerts(alerts)
                 seen = config.alerts_mtime()
             for f in fired:
                 out(f"{stamp()}  {f.message}")
