@@ -7,6 +7,8 @@ then says so, rather than being left out or guessed.
 """
 
 import asyncio
+import contextlib
+import math
 from datetime import datetime, timezone
 
 import httpx
@@ -17,7 +19,7 @@ from .feed import parse_tick
 from .history import REST_BASE, SYMBOL_RE, product_exists
 from .venues import VENUES, mid, rate_symbol, vs_coinbase
 
-SETTLE = 10  # seconds the streaming exchanges get to send a first full set of numbers
+SETTLE = 15  # seconds the streaming exchanges get to send a first full set of numbers (Binance perps take ~8)
 MAX_DEPTH = 500  # book levels per side
 
 
@@ -78,7 +80,7 @@ async def book(client: httpx.AsyncClient, symbol: str, depth: int = 10, group: f
     if group is None:
         step = default_step(steps, middle, levels.dp)
     else:
-        step = round(group / tick)
+        step = round(group / tick) if math.isfinite(group) and group > 0 else 0
         if step not in steps or abs(step * tick - group) > tick / 1e6:
             offered = ", ".join(f"{s * tick:.{step_decimals(s, levels.dp)}f}" for s in steps)
             raise ValueError(f"group for {symbol} must be one of: {offered}")
@@ -89,15 +91,17 @@ async def book(client: httpx.AsyncClient, symbol: str, depth: int = 10, group: f
             "bids": [[round(p, dp), round(s, size_dp)] for p, s in bids], "time": data.get("time"), "exchange": "Coinbase"}
 
 
-async def settle(feeds, ready, timeout: float = SETTLE):
-    """Run `feeds` until each is `ready` or has stopped by itself (not listed), or `timeout` passes; then close them.
-    Their last numbers stay readable."""
+@contextlib.asynccontextmanager
+async def streaming(feeds, ready, timeout: float = SETTLE):
+    """Run `feeds` until each is `ready` or has stopped by itself (not listed), or `timeout` passes. They keep
+    streaming inside the block, so another quote can be taken at the same moment; they close when it ends."""
     tasks = [asyncio.create_task(feed.run()) for feed in feeds]
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     try:
         while loop.time() < end and not all(ready(f) or t.done() for f, t in zip(feeds, tasks)):
             await asyncio.sleep(0.05)
+        yield
     finally:
         for task in tasks:
             task.cancel()
@@ -119,22 +123,21 @@ async def venues(client: httpx.AsyncClient, symbol: str, timeout: float = SETTLE
     if not await product_exists(client, symbol):
         raise LookupError(f"unknown pair: {symbol}")
     feeds = [venue(symbol) for venue in VENUES]
-    await settle(feeds, lambda f: f.bid and f.ask, timeout)
     rate_pair = rate_symbol(symbol)
-    here = await price(client, symbol)  # after the venues, so both sides are from the same moment
-    rate = await price(client, rate_pair) if rate_pair else None
-    usdt = mid(rate["bid"], rate["ask"]) if rate else None
-    quote = symbol.partition("-")[2]
-    coinbase_mid = mid(here["bid"], here["ask"])
-    return {
-        "symbol": symbol, "coinbase": {"bid": here["bid"], "ask": here["ask"], "mid": coinbase_mid},
-        "usdt_rate": usdt,
-        "venues": [{"exchange": f.NAME, "pair": f.pair or None, "quote": f.quote, "bid": f.bid, "ask": f.ask,
-                    "vs_coinbase_bp": vs_coinbase(f, coinbase_mid, usdt, quote),
-                    "status": status(f, f.bid and f.ask, timeout)}
-                   for f in feeds],
-        "note": "vs_coinbase_bp: the venue's mid against Coinbase's mid; USDT prices converted at usdt_rate first",
-    }
+    async with streaming(feeds, lambda f: f.bid and f.ask, timeout):
+        # the venues are still streaming: their quotes below are read the moment Coinbase's arrive
+        here, *rate = await asyncio.gather(*(price(client, s) for s in (symbol, rate_pair) if s))
+        usdt = mid(rate[0]["bid"], rate[0]["ask"]) if rate else None
+        coinbase_mid = mid(here["bid"], here["ask"])
+        return {
+            "symbol": symbol, "coinbase": {"bid": here["bid"], "ask": here["ask"], "mid": coinbase_mid},
+            "usdt_rate": usdt,
+            "venues": [{"exchange": f.NAME, "pair": f.pair or None, "quote": f.quote, "bid": f.bid, "ask": f.ask,
+                        "vs_coinbase_bp": vs_coinbase(f, coinbase_mid, usdt, symbol.partition("-")[2]),
+                        "status": status(f, f.bid and f.ask, timeout)}
+                       for f in feeds],
+            "note": "vs_coinbase_bp: the venue's mid against Coinbase's mid; USDT prices converted at usdt_rate first",
+        }
 
 
 def iso(epoch: float | None) -> str | None:
@@ -145,7 +148,8 @@ async def perps(symbol: str, timeout: float = SETTLE) -> dict:
     """Funding, premium and open interest of the pair's USDT perpetual future on Binance and Bybit."""
     symbol = pair(symbol)
     feeds = [perp(symbol) for perp in PERPS]
-    await settle(feeds, lambda f: f.funding is not None and f.oi is not None, timeout)
+    async with streaming(feeds, lambda f: f.funding is not None and f.oi is not None, timeout):
+        pass
     return {
         "symbol": symbol, "perp": perp_symbol(symbol) or None,
         "venues": [{"exchange": f.NAME, "funding_pct": None if f.funding is None else f.funding * 100,

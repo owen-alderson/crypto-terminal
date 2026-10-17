@@ -116,7 +116,8 @@ class Feed:
             self.on_status("connecting")
             try:
                 async with connect(self.url, ssl=SSL_CONTEXT if self.url.startswith("wss") else None,
-                                   open_timeout=10, max_size=MAX_FRAME) as ws:
+                                   open_timeout=10, close_timeout=1, max_size=MAX_FRAME) as ws:
+                    # close_timeout: a slow close handshake (Binance takes ~8s) never holds up whoever cancelled us
                     for message in self.subscriptions():
                         await ws.send(json.dumps(message))
                     pinger = asyncio.create_task(self.keepalive(ws)) if self.KEEPALIVE else None

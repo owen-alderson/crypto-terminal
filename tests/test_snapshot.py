@@ -85,6 +85,9 @@ async def test_book_refusals():
             await snapshot.book(c, "BTC-USD", group=7)
         with pytest.raises(ValueError, match="must be one of"):
             await snapshot.book(c, "BTC-USD", group=0.015)  # not a whole number of ticks
+        for group in (float("inf"), float("nan"), -10, 0):
+            with pytest.raises(ValueError, match="must be one of"):
+                await snapshot.book(c, "BTC-USD", group=group)
         for depth in (0, snapshot.MAX_DEPTH + 1):
             with pytest.raises(ValueError, match="depth"):
                 await snapshot.book(c, "BTC-USD", depth=depth)
@@ -105,7 +108,7 @@ class Forever:
         await asyncio.Event().wait()
 
 
-async def test_settle_waits_for_data_and_gives_up_on_silence():
+async def test_streaming_waits_for_data_and_gives_up_on_silence():
     class Quick(Forever):
         data = None
 
@@ -120,10 +123,13 @@ async def test_settle_waits_for_data_and_gives_up_on_silence():
 
     quick, stops = Quick(), Stops()
     start = time.monotonic()
-    await snapshot.settle([quick, stops], lambda f: getattr(f, "data", None), timeout=5)
+    async with snapshot.streaming([quick, stops], lambda f: getattr(f, "data", None), timeout=5):
+        pass
     assert time.monotonic() - start < 1 and quick.data == 1  # didn't wait out the timeout
     start = time.monotonic()
-    await snapshot.settle([quick, Forever()], lambda f: getattr(f, "data", None), timeout=0.2)
+    forever = Forever()
+    async with snapshot.streaming([quick, forever], lambda f: getattr(f, "data", None), timeout=0.2):
+        pass
     assert 0.2 <= time.monotonic() - start < 1
 
 
@@ -192,3 +198,24 @@ async def test_perps(monkeypatch):
     assert bybit["status"] == "no data within 0.2s" and bybit["funding_pct"] is None
     none = await snapshot.perps("BTC-EUR", timeout=5)
     assert none["perp"] is None and [v["status"] for v in none["venues"]] == ["no USDT perp"] * 2
+
+
+async def test_venue_quotes_are_from_the_moment_coinbase_answers(monkeypatch):
+    class Moving(fake_venue("Kraken", False)):
+        async def run(self):
+            self._status("live")
+            self.set_quote(81000.0, 81000.2)
+            await asyncio.sleep(0.15)  # the market moves while Coinbase is being asked
+            self.set_quote(81266.0, 81266.2)
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(snapshot, "VENUES", (Moving,))
+    sync = client()
+
+    async def slow(request):
+        await asyncio.sleep(0.3 if request.url.path.endswith(("ticker", "stats")) else 0)
+        return sync._transport.handle_request(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as c:
+        got = await snapshot.venues(c, "BTC-USD", timeout=1)
+    assert got["venues"][0]["bid"] == 81266.0  # not the quote from when the venues first answered

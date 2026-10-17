@@ -72,15 +72,15 @@ def test_book(monkeypatch, capsys, stubbed):
     code, out, _ = run(monkeypatch, capsys, "book", "BTC-USD", "--depth", "2", "--group", "10")
     lines = out.splitlines()
     assert code == 0 and lines[0] == "BTC-USD book on Coinbase · grouped by 10 · spread 0.0012 bp"
-    assert lines[1:] == ["  ask 81,280.00  1.25", "  ask 81,270.00  0.5", "  ─── best bid 81,266.21 · ask 81,266.22",
-                         "  bid 81,260.00  2", "  bid 81,250.00  0.1"]  # best ask nearest the middle
+    assert lines[1:] == ["  ask 81,280.00  1.25", "  ask 81,270.00   0.5", "  ─── best bid 81,266.21 · ask 81,266.22",
+                         "  bid 81,260.00     2", "  bid 81,250.00   0.1"]  # best ask nearest the middle
     code, out, _ = run(monkeypatch, capsys, "book", "BTC-USD", "--json")
     assert json.loads(out)["group"] == 10
 
 
 def test_venues_and_perps_say_what_is_missing(monkeypatch, capsys, stubbed):
     _, out, _ = run(monkeypatch, capsys, "venues", "BTC-USD")
-    assert "Binance  bid 81,370.00 · ask 81,370.20 USDT  +0.71 bp vs Coinbase" in out
+    assert "Binance  bid 81,370.0 · ask 81,370.2 USDT  +0.71 bp vs Coinbase" in out
     assert "OKX      no data within 10s" in out and "converted at 0.99875 USD" in out
     _, out, _ = run(monkeypatch, capsys, "perps", "BTC-USD")
     assert "(BTCUSDT, not spot)" in out and "funding +0.0100%" in out and "OI 94,138.6 BTC" in out
@@ -108,3 +108,14 @@ def test_no_command_opens_the_terminal_and_watch_still_works(monkeypatch, capsys
     monkeypatch.setattr(cli, "run_watch", lambda: (opened.append("watch"), sys.exit(0)))
     assert run(monkeypatch, capsys)[0] == 0 and run(monkeypatch, capsys, "watch")[0] == 0
     assert opened == ["tui", "watch"]
+
+
+def test_text_shows_every_decimal_and_no_exponents():
+    xlm = {**PRICE, "symbol": "XLM-USD", "price": 0.17798, "bid": 0.17798, "ask": 0.177983, "spread_bp": 0.17}
+    assert "bid 0.177980 · ask 0.177983" in cli.show_price([xlm])  # rounded, they'd read the same
+    shib = {"symbol": "SHIB-USD", "group": 1e-08, "bid": 1.234e-05, "ask": 1.235e-05, "mid": 1.2345e-05,
+            "spread_bp": 8.1, "asks": [[1.235e-05, 8826182900.5]], "bids": [[1.234e-05, 0.1 + 0.2]]}
+    text = cli.show_book(shib)
+    assert "grouped by 0.00000001" in text and "ask 0.00001235  8,826,182,900.5" in text
+    assert "bid 0.00001234              0.3" in text and "e-" not in text and "e+" not in text
+    assert cli.exact(250.0) == "250" and cli.exact(1.5, 3) == "1.500"

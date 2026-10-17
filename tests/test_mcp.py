@@ -68,15 +68,19 @@ def test_alerts_round_trip_through_the_terminals_file(server):
     assert [a.kind for a in app_module.load_alerts()] == [">", "move"]  # what the terminal and watch read
     listed = call(server, "list_alerts")
     assert [(a["number"], a["repeats"]) for a in listed] == [(1, False), (2, False)] and listed[1]["ref"] == 81266.22
-    gone = call(server, "remove_alert", number=1)
+    assert call(server, "remove_alert", number=1, alert=move["set"]) == (
+        "error", f"alert 1 is now BTC-USD > 90,000.00, not {move['set']}: call list_alerts again")
+    gone = call(server, "remove_alert", number=1, alert="BTC-USD > 90,000.00")
     assert gone["removed"] == "BTC-USD > 90,000.00" and [a["alert"] for a in gone["alerts"]] == [move["set"]]
-    assert call(server, "remove_alert", number=3) == ("error", "no alert 3: there is 1")
+    assert call(server, "remove_alert", number=3, alert="x") == ("error", "no alert 3: there is 1")
 
 
 def test_set_alert_refusals(server):
     kind, text = call(server, "set_alert", alert="BTC-USD bogus 5")
     assert kind == "error" and text.startswith("usage: alert BTC-USD")
     assert call(server, "set_alert", alert="ZZQ-USD > 1") == ("error", "unknown pair: ZZQ-USD")
+    assert call(server, "set_alert", alert="BTC-EUR funding 0.05%") == (
+        "error", "funding alerts need a USD or USDT pair: there's no USDT perp for BTC-EUR")
     assert app_module.load_alerts() == []
 
 

@@ -3,50 +3,68 @@ import asyncio
 import json
 import signal
 import sys
+from decimal import Decimal
 
 import httpx
 
-from .chart import fmt_price
+from .widgets import fmt_bp
+
+
+def places(*values) -> int:
+    """Decimals the most precise of `values` has: every digit the exchange sent, so 0.17798 and 0.177983 never both
+    read 0.17798. Rounded at 10 decimals first, which drops float noise (0.30000000000000004) and nothing real."""
+    return max((max(0, -Decimal(repr(round(v, 10))).normalize().as_tuple().exponent) for v in values if v is not None),
+               default=0)
+
+
+def exact(value: float, dp: int | None = None) -> str:
+    """Thousands separators and all of the number's decimals (padded to `dp`), never scientific notation."""
+    return f"{Decimal(repr(round(value, 10))):,.{places(value) if dp is None else dp}f}"
 
 
 def signed_bp(bp) -> str:
     return "—" if bp is None else f"{bp:+.2f} bp"
 
 
-def size(value: float) -> str:
-    return f"{value:,.8g}"
-
-
 def show_price(rows: list[dict]) -> str:
-    return "\n".join(
-        f"{r['symbol']:<10} {fmt_price(r['price']):>14}  {r['change_24h_pct']:+.2f}% 24h  "
-        + (f"bid {fmt_price(r['bid'])} · ask {fmt_price(r['ask'])} · spread {r['spread_bp']:.2g} bp"
-           if r["bid"] else "no valid bid/ask") for r in rows)
+    lines = []
+    for r in rows:
+        dp = places(r["price"], r["bid"], r["ask"])
+        lines.append(f"{r['symbol']:<10} {exact(r['price'], dp):>14}  {r['change_24h_pct']:+.2f}% 24h  " + (
+            f"bid {exact(r['bid'], dp)} · ask {exact(r['ask'], dp)} · spread {fmt_bp(r['spread_bp'])} bp"
+            if r["bid"] else "no valid bid/ask"))
+    return "\n".join(lines)
 
 
 def show_book(b: dict) -> str:
-    width = max(len(fmt_price(p)) for p, _ in b["asks"] + b["bids"])
-    lines = [f"{b['symbol']} book on Coinbase · grouped by {b['group']:g} · spread {b['spread_bp']:.2g} bp"
-             if b["spread_bp"] is not None else f"{b['symbol']} book on Coinbase · grouped by {b['group']:g}"]
-    lines += [f"  ask {fmt_price(p):>{width}}  {size(s)}" for p, s in reversed(b["asks"])]
+    ladder = b["asks"][::-1] + b["bids"]
+    dp = places(*(p for p, _ in ladder), b["bid"], b["ask"])
+    width = max(len(exact(p, dp)) for p, _ in ladder)
+    size_width = max(len(exact(s)) for _, s in ladder)
+    spread = f" · spread {fmt_bp(b['spread_bp'])} bp" if b["spread_bp"] is not None else ""
+    lines = [f"{b['symbol']} book on Coinbase · grouped by {exact(b['group'])}{spread}"]
+    lines += [f"  ask {exact(p, dp):>{width}}  {exact(s):>{size_width}}" for p, s in b["asks"][::-1]]
     # the real best prices (grouping hides them), not the mid: it needs a decimal more than Coinbase quotes
-    lines.append(f"  ─── best bid {fmt_price(b['bid'])} · ask {fmt_price(b['ask'])}" if b["mid"] else "  ───")
-    lines += [f"  bid {fmt_price(p):>{width}}  {size(s)}" for p, s in b["bids"]]
+    best = [f"bid {exact(b['bid'], dp)}"] * bool(b["bid"]) + [f"ask {exact(b['ask'], dp)}"] * bool(b["ask"])
+    lines.append(f"  ─── best {' · '.join(best)}")
+    lines += [f"  bid {exact(p, dp):>{width}}  {exact(s):>{size_width}}" for p, s in b["bids"]]
     return "\n".join(lines)
 
 
 def show_venues(v: dict) -> str:
     cb = v["coinbase"]
-    lines = [f"{v['symbol']} on other exchanges · Coinbase bid {fmt_price(cb['bid'])} · ask {fmt_price(cb['ask'])}"
+    dp = places(cb["bid"], cb["ask"])
+    lines = [f"{v['symbol']} on other exchanges · Coinbase bid {exact(cb['bid'], dp)} · ask {exact(cb['ask'], dp)}"
              if cb["mid"] else f"{v['symbol']} · no Coinbase bid/ask to compare with"]
     for row in v["venues"]:
         if row["status"] == "live":
-            lines.append(f"  {row['exchange']:<8} bid {fmt_price(row['bid'])} · ask {fmt_price(row['ask'])} {row['quote']}"
-                         f"  {signed_bp(row['vs_coinbase_bp'])} vs Coinbase")
+            dp = places(row["bid"], row["ask"])
+            lines.append(f"  {row['exchange']:<8} bid {exact(row['bid'], dp)} · ask {exact(row['ask'], dp)} "
+                         f"{row['quote']}  {signed_bp(row['vs_coinbase_bp'])} vs Coinbase")
         else:
             lines.append(f"  {row['exchange']:<8} {row['status']}")
     if v["usdt_rate"]:
-        lines.append(f"  USDT prices converted at {v['usdt_rate']:.5f} USD (Coinbase USDT-USD)")
+        lines.append(f"  USDT prices converted at {exact(v['usdt_rate'])} USD (Coinbase USDT-USD mid)")
     return "\n".join(lines)
 
 
@@ -58,7 +76,7 @@ def show_perps(p: dict) -> str:
             continue
         interval = f" every {row['interval_h']}h" if row["interval_h"] else ""
         coin = p["symbol"].partition("-")[0]
-        oi = f"OI {size(row['open_interest'])} {coin}" if row["open_interest"] is not None else "OI unknown"
+        oi = f"OI {exact(row['open_interest'])} {coin}" if row["open_interest"] is not None else "OI unknown"
         lines.append(f"  {row['exchange']:<8} funding {row['funding_pct']:+.4f}% (next {row['next_funding']}{interval})"
                      f" · premium {signed_bp(row['premium_bp'])} · {oi}")
     return "\n".join(lines)
@@ -133,6 +151,8 @@ def main():
         except (LookupError, ValueError, httpx.HTTPError) as e:
             print(f"crypto-terminal: {str(e) or type(e).__name__}", file=sys.stderr)
             sys.exit(1)
+        except KeyboardInterrupt:
+            sys.exit(130)
         print(json.dumps(data, indent=2) if args.json else text)
         return
     from .app import TerminalApp

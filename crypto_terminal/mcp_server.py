@@ -12,7 +12,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import app as config  # read paths at call time: tests point them elsewhere
 from . import snapshot
-from .alerts import USAGE, Alert, parse_alert
+from .alerts import PERP_KINDS, USAGE, Alert, parse_alert
+from .derivs import perp_symbol
 from .history import product_exists
 
 INSTRUCTIONS = """Live crypto market data from public exchange feeds (no keys), and the user's crypto-terminal alerts.
@@ -76,7 +77,7 @@ def build() -> MCPServer:
     @_explained
     async def venues(symbol: str) -> dict:
         """The pair's best bid/ask on Kraken, Binance, Bybit and OKX, and each mid against Coinbase's in basis points
-        (USDT venues converted to USD first). Takes up to 10 seconds: those exchanges only stream."""
+        (USDT venues converted to USD first). Takes up to 15 seconds: those exchanges only stream."""
         async with httpx.AsyncClient() as client:
             return await snapshot.venues(client, symbol)
 
@@ -84,7 +85,7 @@ def build() -> MCPServer:
     @_explained
     async def perps(symbol: str) -> dict:
         """Perpetual futures on Binance and Bybit for the pair (BTC-USD -> BTCUSDT): funding rate and next funding
-        time, premium of mark over index in basis points, open interest in the base coin. Takes up to 10 seconds."""
+        time, premium of mark over index in basis points, open interest in the base coin. Takes up to 15 seconds."""
         return await snapshot.perps(symbol)
 
     @server.tool()
@@ -103,6 +104,8 @@ def build() -> MCPServer:
         if words[:1] == ["alert"]:
             words = words[1:]
         new = parse_alert(words)
+        if new.kind in PERP_KINDS and not perp_symbol(new.symbol):  # the perp feeds would only say "no USDT perp"
+            raise ValueError(f"{new.kind} alerts need a USD or USDT pair: there's no USDT perp for {new.symbol}")
         async with httpx.AsyncClient() as client:
             if not await product_exists(client, new.symbol):
                 raise LookupError(f"unknown pair: {new.symbol}")
@@ -116,11 +119,14 @@ def build() -> MCPServer:
 
     @server.tool()
     @_explained
-    async def remove_alert(number: int) -> dict:
-        """Remove alert `number` (from `list_alerts`). Returns what was removed and what's left."""
+    async def remove_alert(number: int, alert: str) -> dict:
+        """Remove alert `number`, whose `alert` text from `list_alerts` must match (a one-shot alert that fired since
+        then renumbers the rest: the wrong one is never removed). Returns what was removed and what's left."""
         alerts = config.load_alerts()
         if not 1 <= number <= len(alerts):
             raise LookupError(f"no alert {number}: there {'is' if len(alerts) == 1 else 'are'} {len(alerts)}")
+        if str(alerts[number - 1]) != alert:
+            raise LookupError(f"alert {number} is now {alerts[number - 1]}, not {alert}: call list_alerts again")
         removed = alerts.pop(number - 1)
         config.save_alerts(alerts)
         return {"removed": str(removed), "alerts": listed(alerts)}

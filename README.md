@@ -117,34 +117,34 @@ One-shot snapshots, from the same feeds and checks as the terminal's panels:
 
 ```console
 $ crypto-terminal price BTC-USD ETH-USD
-BTC-USD         81,399.46  +0.46% 24h  bid 81,399.45 · ask 81,399.46 · spread 0.0012 bp
-ETH-USD          2,413.70  +0.45% 24h  bid 2,413.68 · ask 2,413.70 · spread 0.083 bp
+BTC-USD         81,445.36  +0.51% 24h  bid 81,445.36 · ask 81,445.37 · spread 0.0012 bp
+ETH-USD          2,416.33  +0.56% 24h  bid 2,416.32 · ask 2,416.33 · spread 0.041 bp
 
 $ crypto-terminal book BTC-USD --depth 3
 BTC-USD book on Coinbase · grouped by 10 · spread 0.0012 bp
-  ask 81,420.00  2.4960862
-  ask 81,410.00  0.54755205
-  ask 81,400.00  0.07573163
-  ─── best bid 81,399.45 · ask 81,399.46
-  bid 81,390.00  0.86134439
-  bid 81,380.00  3.5705659
-  bid 81,370.00  1.5995264
+  ask 81,470.00  2.01535224
+  ask 81,460.00  3.29623002
+  ask 81,450.00  0.47487558
+  ─── best bid 81,445.36 · ask 81,445.37
+  bid 81,440.00  0.31974371
+  bid 81,430.00  3.02482944
+  bid 81,420.00  3.43443475
 
 $ crypto-terminal venues BTC-USD
-BTC-USD on other exchanges · Coinbase bid 81,370.90 · ask 81,370.91
-  Kraken   bid 81,392.00 · ask 81,392.10 USD  +2.60 bp vs Coinbase
-  Binance  bid 81,506.16 · ask 81,506.17 USDT  +3.35 bp vs Coinbase
-  Bybit    bid 81,501.80 · ask 81,501.90 USDT  +2.82 bp vs Coinbase
-  OKX      bid 81,497.80 · ask 81,497.90 USDT  +2.33 bp vs Coinbase
-  USDT prices converted at 0.99867 USD (Coinbase USDT-USD)
+BTC-USD on other exchanges · Coinbase bid 81,445.36 · ask 81,445.37
+  Kraken   bid 81,449.8 · ask 81,449.9 USD  +0.55 bp vs Coinbase
+  Binance  bid 81,559.85 · ask 81,559.86 USDT  +0.79 bp vs Coinbase
+  Bybit    bid 81,555.2 · ask 81,555.3 USDT  +0.22 bp vs Coinbase
+  OKX      bid 81,555.1 · ask 81,555.2 USDT  +0.21 bp vs Coinbase
+  USDT prices converted at 0.998675 USD (Coinbase USDT-USD mid)
 
 $ crypto-terminal perps BTC-USD
 BTC-USD perpetual futures (BTCUSDT, not spot)
-  Binance  funding +0.0027% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -3.67 bp · OI 93,671.114 BTC
-  Bybit    funding +0.0062% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -4.00 bp · OI 29,573.425 BTC
+  Binance  funding +0.0028% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -5.03 bp · OI 93,764.384 BTC
+  Bybit    funding +0.0066% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -4.35 bp · OI 29,605.919 BTC
 ```
 
-Add `--json` to any of them for scripts and pipes: `crypto-terminal price BTC-USD --json | jq '.[0].price'`. `book` takes `--group` (a price step: `--group 100` for $100 on BTC; it lists the valid steps if you pick another) and `--depth`. Grouped asks round up and bids round down, as in the terminal, so a level never looks better than what's on offer. `venues` and `perps` wait up to 10 seconds for those exchanges' streams; one that hasn't answered by then says `no data within 10s` instead of showing an old or made-up number. A failed lookup (unknown pair, network down) prints why and exits 1.
+Add `--json` to any of them for scripts and pipes: `crypto-terminal price BTC-USD --json | jq '.[0].price'`. `book` takes `--group` (a price step: `--group 100` for $100 on BTC; it lists the valid steps if you pick another) and `--depth`. Grouped asks round up and bids round down, as in the terminal, so a level never looks better than what's on offer. Prices print with every decimal the exchange sent. `venues` and `perps` open those exchanges' streams and wait until each has answered (usually a few seconds, at most 15), and read Coinbase while the streams are still open, so both sides of a comparison are from the same moment; one that hasn't answered says `no data within 15s` instead of showing an old or made-up number. A failed lookup (unknown pair, network down) prints why and exits 1.
 
 **MCP server**: lets Claude answer "is BTC cheaper on Kraken right now?" or "how crowded is the ETH long?" from live data, and set alerts for you.
 
@@ -153,7 +153,7 @@ pipx install 'crypto-terminal[mcp]'     # or: pipx inject crypto-terminal mcp
 claude mcp add crypto-terminal -- crypto-terminal mcp
 ```
 
-Tools: `price`, `book`, `venues`, `perps`, `list_alerts`, `set_alert` (the terminal's syntax: `BTC-USD move 2% 15m`), `remove_alert`. Alerts go into the same file the terminal and `watch` read, and `set_alert` tells Claude whether anything is running that will check it.
+Tools: `price`, `book`, `venues`, `perps`, `list_alerts`, `set_alert` (the terminal's syntax: `BTC-USD move 2% 15m`), `remove_alert` (by number and the alert's text, so a renumbered list never removes the wrong one). Alerts go into the same file the terminal and `watch` read, and `set_alert` tells Claude whether anything is running that will check it.
 
 ## From source
 
