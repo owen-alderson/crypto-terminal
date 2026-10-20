@@ -101,3 +101,24 @@ async def test_trades_stream_only_for_trade_alert_pairs_and_skip_the_replayed_la
     assert subs[0]["channels"] == ["ticker", "heartbeat", {"name": "matches", "product_ids": ["BTC-USD"]}]
     assert [(symbol, t.id, t.taker, t.buy) for symbol, t in trades] == [("BTC-USD", 2, "t1", True)]
     assert Feed(["BTC-USD"], ticks.append).channels() == ["ticker", "heartbeat"]  # no trade alerts: no trades
+
+
+async def test_cancel_stops_the_feed_even_when_a_frame_lands_in_the_same_loop_pass():
+    """The one-shot's intermittent hang: Python 3.11's wait_for returned the frame and dropped the cancel, so the
+    feed streamed on and `streaming()` waited for it forever. (3.12's wait_for is fixed: this passes there either way.)"""
+    class Socket:
+        def __init__(self):
+            self.frames = []
+
+        async def recv(self):
+            self.frames.append(asyncio.get_running_loop().create_future())
+            return await self.frames[-1]
+
+    ws = Socket()
+    task = asyncio.create_task(Feed(["BTC-USD"], lambda t: None).receive(ws))
+    while not ws.frames:
+        await asyncio.sleep(0.01)
+    ws.frames[-1].set_result(json.dumps({"type": "heartbeat"}))  # a frame arrives...
+    task.cancel()  # ...in the same pass as the cancel
+    done, _ = await asyncio.wait({task}, timeout=1)
+    assert done and task.cancelled()
