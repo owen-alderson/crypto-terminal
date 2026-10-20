@@ -139,8 +139,16 @@ class Feed:
     async def receive(self, ws):
         live = False
         while True:
-            # wait_for catches a half-open socket that never errors
-            raw = await asyncio.wait_for(ws.recv(), self.reconnect_after)
+            # the timeout catches a half-open socket that never errors. Not wait_for: before Python 3.12 it returns the
+            # frame and drops the cancel when both land in one loop pass, and the feed streams on after being stopped
+            recv = asyncio.ensure_future(ws.recv())
+            try:
+                done, _ = await asyncio.wait({recv}, timeout=self.reconnect_after)
+            finally:
+                recv.cancel()  # no-op once it has a frame
+            if not done:
+                raise TimeoutError
+            raw = recv.result()
             try:
                 msg = json.loads(raw)
             except ValueError:
