@@ -1,4 +1,5 @@
 # Re-record the README demo: `vhs docs/demo.tape` from the repo root (live Coinbase data, a throwaway config dir).
+# Then `gifsicle -O3 --lossy=10 -b docs/demo.gif`: GitHub's image proxy won't show a README image over 5 MB.
 Output docs/demo.gif
 
 Set Shell zsh
@@ -23,6 +24,15 @@ Sleep 3s
 Up
 Sleep 3s
 
+# the same pair on Kraken, Binance, Bybit and OKX, then perps: funding, open interest, liquidations
+Type "x"
+Sleep 4s
+Type "d"
+Sleep 5s
+Type "x"
+Type "d"
+Sleep 1s
+
 # group the book more coarsely so walls stand out
 Type "g"
 Sleep 3s
@@ -43,9 +53,9 @@ Sleep 2s
 Enter
 Sleep 2s
 
-# a price alert (fires on a ±0.5% move: bell, toast and a desktop notification)
+# a watch alert that stays armed (bell, toast, desktop notification, optional phone push)
 Type "/"
-Type "alert BTC-USD move 0.5%"
+Type "alert BTC-USD move 2% 15m"
 Enter
 Sleep 3s
 
@@ -58,7 +68,7 @@ Type "b"
 Sleep 4s
 Type "b"
 Type "f"
-Sleep 5s
+Sleep 4s
 
 Ctrl+Q
 Sleep 1s
