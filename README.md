@@ -1,6 +1,6 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone. Prices, the book, other exchanges and perps are also one-shot commands with `--json`, and an MCP server lets Claude read the same live data and set alerts.
+A free, open-source crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone. Prices, the book, other exchanges and perps are also one-shot commands with `--json`, and an MCP server lets Claude read the same live data and set alerts.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, the pair on other exchanges, perps funding and open interest, price grouping, indicators, coin search, a watch alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
 
@@ -199,6 +199,12 @@ pytest
 ## History
 
 This repo started as a Streamlit + CoinGecko portfolio dashboard that polled every 60s. That version is preserved at the `v1-streamlit` tag (`git checkout v1-streamlit`).
+
+## Data and terms
+
+crypto-terminal is an independent open-source project. It is not affiliated with or endorsed by Coinbase, Kraken, Binance, Bybit or OKX; their names are used only to say where each number comes from.
+
+It doesn't host, store or resell any market data. Your copy connects straight from your machine to each exchange's public feed, so your use of that data is governed by each exchange's own terms, which you accept by using it. They generally allow personal use only and don't allow redistributing or publishing the data or charts made from it, and some exchanges don't serve every country (Bybit, for example, excludes the US). Read the ones that apply to you: [Coinbase Market Data Terms](https://www.coinbase.com/legal/market_data), [Kraken](https://www.kraken.com/legal/global-terms), [Binance](https://www.binance.com/en/about-legal/terms), [Bybit API terms](https://www.bybit.com/en/legal/service-specific-terms/API-Terms), [OKX API agreement](https://www.okx.com/en-us/help/okx-api-agreement).
 
 ## License
 
