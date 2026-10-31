@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "crypto-terminal"
 version = "2.5.1"
-description = "A free, Bloomberg-style crypto terminal for your shell: live Coinbase prices, candles, order book, other exchanges, perps, indicators and smart alerts, plus one-shot commands (--json) and an MCP server."
+description = "A free, open-source crypto terminal for your shell: live Coinbase prices, candles, order book, other exchanges, perps, indicators and smart alerts, plus one-shot commands (--json) and an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

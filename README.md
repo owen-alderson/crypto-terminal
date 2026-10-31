@@ -1,8 +1,10 @@
 # crypto-terminal
 
-A free, Bloomberg-style crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone. Prices, the book, other exchanges and perps are also one-shot commands with `--json`, and an MCP server lets Claude read the same live data and set alerts.
+A free, open-source crypto terminal that runs in your shell. Live spot prices stream straight from the Coinbase Exchange public websocket: no API key, no account, no polling. Candlestick charts with a live last bar, a live order book and trade tape, the same pair on Kraken, Binance, Bybit and OKX, perpetual futures context (funding, open interest, liquidations), indicators, search across every Coinbase pair, and alerts for fast moves, wide spreads, big orders, volume spikes, funding and liquidations that can run in the background and push to your phone. Prices, the book, other exchanges and perps are also one-shot commands with `--json`, and an MCP server lets Claude read the same live data and set alerts.
 
 ![Crypto terminal demo: live watchlist, candles, order book and trade tape, the pair on other exchanges, perps funding and open interest, price grouping, indicators, coin search, a watch alert and the three views](https://raw.githubusercontent.com/owen-alderson/crypto-terminal/main/docs/demo.gif)
+
+*Demo recorded with made-up data ([`docs/demo_offline.py`](docs/demo_offline.py)).*
 
 [![PyPI](https://img.shields.io/pypi/v/crypto-terminal?color=ffb000)](https://pypi.org/project/crypto-terminal/) ![Textual](https://img.shields.io/badge/built%20with-Textual-ffb000) ![Coinbase](https://img.shields.io/badge/data-Coinbase%20Exchange-0052FF)
 
@@ -113,35 +115,35 @@ Each alert prints one line to stdout, so `crypto-terminal watch >> ~/crypto-aler
 
 ## Scripts and Claude
 
-One-shot snapshots, from the same feeds and checks as the terminal's panels:
+One-shot snapshots, from the same feeds and checks as the terminal's panels (example output, made-up numbers):
 
 ```console
 $ crypto-terminal price BTC-USD ETH-USD
-BTC-USD         81,445.36  +0.51% 24h  bid 81,445.36 · ask 81,445.37 · spread 0.0012 bp
-ETH-USD          2,416.33  +0.56% 24h  bid 2,416.32 · ask 2,416.33 · spread 0.041 bp
+BTC-USD         49,958.17  +1.67% 24h  bid 49,958.16 · ask 49,958.17 · spread 0.0020 bp
+ETH-USD          2,594.13  +2.86% 24h  bid 2,594.12 · ask 2,594.13 · spread 0.039 bp
 
 $ crypto-terminal book BTC-USD --depth 3
-BTC-USD book on Coinbase · grouped by 10 · spread 0.0012 bp
-  ask 81,470.00  2.01535224
-  ask 81,460.00  3.29623002
-  ask 81,450.00  0.47487558
-  ─── best bid 81,445.36 · ask 81,445.37
-  bid 81,440.00  0.31974371
-  bid 81,430.00  3.02482944
-  bid 81,420.00  3.43443475
+BTC-USD book on Coinbase · grouped by 10 · spread 0.0020 bp
+  ask 49,980.00  2.35565378
+  ask 49,970.00  1.78705384
+  ask 49,960.00  4.10522907
+  ─── best bid 49,958.16 · ask 49,958.17
+  bid 49,950.00  4.29021000
+  bid 49,940.00  11.04277318
+  bid 49,930.00  9.74892602
 
 $ crypto-terminal venues BTC-USD
-BTC-USD on other exchanges · Coinbase bid 81,445.36 · ask 81,445.37
-  Kraken   bid 81,449.8 · ask 81,449.9 USD  +0.55 bp vs Coinbase
-  Binance  bid 81,559.85 · ask 81,559.86 USDT  +0.79 bp vs Coinbase
-  Bybit    bid 81,555.2 · ask 81,555.3 USDT  +0.22 bp vs Coinbase
-  OKX      bid 81,555.1 · ask 81,555.2 USDT  +0.21 bp vs Coinbase
-  USDT prices converted at 0.998675 USD (Coinbase USDT-USD mid)
+BTC-USD on other exchanges · Coinbase bid 49,958.16 · ask 49,958.17
+  Kraken   bid 49,962.1 · ask 49,962.2 USD  +0.80 bp vs Coinbase
+  Binance  bid 49,946.41 · ask 49,946.42 USDT  +1.05 bp vs Coinbase
+  Bybit    bid 49,942.6 · ask 49,942.7 USDT  +0.29 bp vs Coinbase
+  OKX      bid 49,941.9 · ask 49,942.0 USDT  +0.15 bp vs Coinbase
+  USDT prices converted at 1.00034 USD (Coinbase USDT-USD mid)
 
 $ crypto-terminal perps BTC-USD
 BTC-USD perpetual futures (BTCUSDT, not spot)
-  Binance  funding +0.0028% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -5.03 bp · OI 93,764.384 BTC
-  Bybit    funding +0.0066% (next 2026-10-18T00:00:00+00:00 every 8h) · premium -4.35 bp · OI 29,605.919 BTC
+  Binance  funding +0.0037% (next 2026-11-01T00:00:00+00:00 every 8h) · premium -4.89 bp · OI 90,187.512 BTC
+  Bybit    funding +0.0085% (next 2026-11-01T00:00:00+00:00 every 8h) · premium -5.49 bp · OI 30,071.448 BTC
 ```
 
 Add `--json` to any of them for scripts and pipes: `crypto-terminal price BTC-USD --json | jq '.[0].price'`. `book` takes `--group` (a price step: `--group 100` for $100 on BTC; it lists the valid steps if you pick another) and `--depth`. Grouped asks round up and bids round down, as in the terminal, so a level never looks better than what's on offer. Prices print with every decimal the exchange sent. `venues` and `perps` open those exchanges' streams and wait until each has answered (usually a few seconds, at most 15), and read Coinbase while the streams are still open, so both sides of a comparison are from the same moment; one that hasn't answered says `no data within 15s` instead of showing an old or made-up number. A failed lookup (unknown pair, network down) prints why and exits 1.
@@ -199,6 +201,12 @@ pytest
 ## History
 
 This repo started as a Streamlit + CoinGecko portfolio dashboard that polled every 60s. That version is preserved at the `v1-streamlit` tag (`git checkout v1-streamlit`).
+
+## Data and terms
+
+crypto-terminal is an independent open-source project. It is not affiliated with or endorsed by Coinbase, Kraken, Binance, Bybit or OKX; their names are used only to say where each number comes from.
+
+It doesn't host, store or resell any market data. Your copy connects straight from your machine to each exchange's public feed, so your use of that data is governed by each exchange's own terms, which you accept by using it. They generally allow personal use only and don't allow redistributing or publishing the data or charts made from it, and some exchanges don't serve every country (Bybit, for example, excludes the US). Read the ones that apply to you: [Coinbase Market Data Terms](https://www.coinbase.com/legal/market_data), [Kraken](https://www.kraken.com/legal/global-terms), [Binance](https://www.binance.com/en/about-legal/terms), [Bybit API terms](https://www.bybit.com/en/legal/service-specific-terms/API-Terms), [OKX API agreement](https://www.okx.com/en-us/help/okx-api-agreement).
 
 ## License
 
