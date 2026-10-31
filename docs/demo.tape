@@ -1,4 +1,5 @@
-# Re-record the README demo: `vhs docs/demo.tape` from the repo root (live Coinbase data, a throwaway config dir).
+# Re-record the README demo: `vhs docs/demo.tape` from the repo root. It runs on made-up data (docs/demo_offline.py,
+# no network): exchange terms don't allow showing their market data to others. A throwaway config dir.
 # Then `gifsicle -O3 --lossy=10 -b docs/demo.gif`: GitHub's image proxy won't show a README image over 5 MB.
 Output docs/demo.gif
 
@@ -12,7 +13,7 @@ Set TypingSpeed 60ms
 Set Theme { "background": "#000000", "foreground": "#e0e0e0" }
 
 Hide
-Type "export XDG_CONFIG_HOME=$(mktemp -d) && clear && .venv/bin/python -m crypto_terminal"
+Type "export XDG_CONFIG_HOME=$(mktemp -d) && clear && .venv/bin/python docs/demo_offline.py"
 Enter
 Sleep 8s
 Show
